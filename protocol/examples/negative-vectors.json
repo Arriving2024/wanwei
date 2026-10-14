@@ -1,0 +1,256 @@
+{
+  "protocol": "wanwei-p0/0.1",
+  "status": "expected-rejections-not-executed-client-results",
+  "instructions": "Unless specified otherwise, assume valid authenticated P2P transport and a valid prior state. Wrappers are test metadata. Error codes may be sent at most once only if the authenticated stream remains usable; otherwise close and record locally.",
+  "cases": [
+    {
+      "name": "offer-size--1",
+      "phase": "await-offer",
+      "input": {
+        "kind": 1,
+        "payloadUtf8": "{\"type\":\"OFFER\",\"transferId\":\"00112233445566778899aabbccddeeff00\",\"fixture\":\"ramp256-1mib-v1\",\"sizeBytes\":-1,\"sha256\":\"fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83\"}"
+      },
+      "expected": "INVALID_MESSAGE",
+      "reason": "Reject non-canonical integer tokens, wrong type, uint32 overflow, or values other than the fixed fixture size."
+    },
+    {
+      "name": "offer-size--0",
+      "phase": "await-offer",
+      "input": {
+        "kind": 1,
+        "payloadUtf8": "{\"type\":\"OFFER\",\"transferId\":\"00112233445566778899aabbccddeeff00\",\"fixture\":\"ramp256-1mib-v1\",\"sizeBytes\":-0,\"sha256\":\"fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83\"}"
+      },
+      "expected": "INVALID_MESSAGE",
+      "reason": "Reject non-canonical integer tokens, wrong type, uint32 overflow, or values other than the fixed fixture size."
+    },
+    {
+      "name": "offer-size-1048576.0",
+      "phase": "await-offer",
+      "input": {
+        "kind": 1,
+        "payloadUtf8": "{\"type\":\"OFFER\",\"transferId\":\"00112233445566778899aabbccddeeff00\",\"fixture\":\"ramp256-1mib-v1\",\"sizeBytes\":1048576.0,\"sha256\":\"fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83\"}"
+      },
+      "expected": "INVALID_MESSAGE",
+      "reason": "Reject non-canonical integer tokens, wrong type, uint32 overflow, or values other than the fixed fixture size."
+    },
+    {
+      "name": "offer-size-1.048576e6",
+      "phase": "await-offer",
+      "input": {
+        "kind": 1,
+        "payloadUtf8": "{\"type\":\"OFFER\",\"transferId\":\"00112233445566778899aabbccddeeff00\",\"fixture\":\"ramp256-1mib-v1\",\"sizeBytes\":1.048576e6,\"sha256\":\"fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83\"}"
+      },
+      "expected": "INVALID_MESSAGE",
+      "reason": "Reject non-canonical integer tokens, wrong type, uint32 overflow, or values other than the fixed fixture size."
+    },
+    {
+      "name": "offer-size-4294967296",
+      "phase": "await-offer",
+      "input": {
+        "kind": 1,
+        "payloadUtf8": "{\"type\":\"OFFER\",\"transferId\":\"00112233445566778899aabbccddeeff00\",\"fixture\":\"ramp256-1mib-v1\",\"sizeBytes\":4294967296,\"sha256\":\"fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83\"}"
+      },
+      "expected": "INVALID_MESSAGE",
+      "reason": "Reject non-canonical integer tokens, wrong type, uint32 overflow, or values other than the fixed fixture size."
+    },
+    {
+      "name": "offer-size-\"1048576\"",
+      "phase": "await-offer",
+      "input": {
+        "kind": 1,
+        "payloadUtf8": "{\"type\":\"OFFER\",\"transferId\":\"00112233445566778899aabbccddeeff00\",\"fixture\":\"ramp256-1mib-v1\",\"sizeBytes\":\"1048576\",\"sha256\":\"fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83\"}"
+      },
+      "expected": "INVALID_MESSAGE",
+      "reason": "Reject non-canonical integer tokens, wrong type, uint32 overflow, or values other than the fixed fixture size."
+    },
+    {
+      "name": "offer-size-0",
+      "phase": "await-offer",
+      "input": {
+        "kind": 1,
+        "payloadUtf8": "{\"type\":\"OFFER\",\"transferId\":\"00112233445566778899aabbccddeeff00\",\"fixture\":\"ramp256-1mib-v1\",\"sizeBytes\":0,\"sha256\":\"fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83\"}"
+      },
+      "expected": "INVALID_MESSAGE",
+      "reason": "Reject non-canonical integer tokens, wrong type, uint32 overflow, or values other than the fixed fixture size."
+    },
+    {
+      "name": "offer-size-4294967295",
+      "phase": "await-offer",
+      "input": {
+        "kind": 1,
+        "payloadUtf8": "{\"type\":\"OFFER\",\"transferId\":\"00112233445566778899aabbccddeeff00\",\"fixture\":\"ramp256-1mib-v1\",\"sizeBytes\":4294967295,\"sha256\":\"fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83\"}"
+      },
+      "expected": "INVALID_MESSAGE",
+      "reason": "Reject non-canonical integer tokens, wrong type, uint32 overflow, or values other than the fixed fixture size."
+    },
+    {
+      "name": "offer-size-1048575",
+      "phase": "await-offer",
+      "input": {
+        "kind": 1,
+        "payloadUtf8": "{\"type\":\"OFFER\",\"transferId\":\"00112233445566778899aabbccddeeff00\",\"fixture\":\"ramp256-1mib-v1\",\"sizeBytes\":1048575,\"sha256\":\"fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83\"}"
+      },
+      "expected": "INVALID_MESSAGE",
+      "reason": "Reject non-canonical integer tokens, wrong type, uint32 overflow, or values other than the fixed fixture size."
+    },
+    {
+      "name": "duplicate-json-key",
+      "phase": "await-offer",
+      "input": {
+        "kind": 1,
+        "payloadUtf8": "{\"type\":\"OFFER\",\"transferId\":\"00112233445566778899aabbccddeeff00\",\"fixture\":\"ramp256-1mib-v1\",\"sizeBytes\":1048576,\"sizeBytes\":1048576,\"sha256\":\"fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83\"}"
+      },
+      "expected": "INVALID_MESSAGE"
+    },
+    {
+      "name": "remote-path-not-allowed",
+      "phase": "await-offer",
+      "input": {
+        "kind": 1,
+        "payloadUtf8": "{\"type\":\"OFFER\",\"transferId\":\"00112233445566778899aabbccddeeff00\",\"fixture\":\"ramp256-1mib-v1\",\"sizeBytes\":1048576,\"sha256\":\"fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83\",\"path\":\"../../outside.bin\"}"
+      },
+      "expected": "INVALID_MESSAGE"
+    },
+    {
+      "name": "wrong-fixture-hash",
+      "phase": "await-offer",
+      "input": {
+        "kind": 1,
+        "payloadUtf8": "{\"type\":\"OFFER\",\"transferId\":\"00112233445566778899aabbccddeeff00\",\"fixture\":\"ramp256-1mib-v1\",\"sizeBytes\":1048576,\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"}"
+      },
+      "expected": "INVALID_MESSAGE"
+    },
+    {
+      "name": "wrong-version",
+      "phase": "await-sender-hello",
+      "input": {
+        "kind": 1,
+        "payloadUtf8": "{\"type\":\"HELLO\",\"version\":\"0.2\",\"role\":\"sender\",\"service\":\"file.p0\",\"identity\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+      },
+      "expected": "UNSUPPORTED_VERSION"
+    },
+    {
+      "name": "media-reserved-not-implemented",
+      "phase": "await-sender-hello",
+      "input": {
+        "kind": 1,
+        "payloadUtf8": "{\"type\":\"HELLO\",\"version\":\"0.1\",\"role\":\"sender\",\"service\":\"media.screen\",\"identity\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+      },
+      "expected": "UNSUPPORTED_SERVICE"
+    },
+    {
+      "name": "hello-identity-mismatch",
+      "phase": "await-sender-hello",
+      "authenticatedPeerIdentityFixture": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "input": {
+        "kind": 1,
+        "payloadUtf8": "{\"type\":\"HELLO\",\"version\":\"0.1\",\"role\":\"sender\",\"service\":\"file.p0\",\"identity\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}"
+      },
+      "expected": "IDENTITY_MISMATCH"
+    },
+    {
+      "name": "data-before-accept",
+      "phase": "await-user-confirmation",
+      "input": {
+        "wireHex": "020000000100"
+      },
+      "expected": "UNEXPECTED_MESSAGE"
+    },
+    {
+      "name": "zero-control-length",
+      "phase": "await-sender-hello",
+      "input": {
+        "headerHex": "0100000000"
+      },
+      "expected": "INVALID_FRAME"
+    },
+    {
+      "name": "oversized-control-length",
+      "phase": "await-sender-hello",
+      "input": {
+        "headerHex": "0100001001"
+      },
+      "expected": "INVALID_FRAME"
+    },
+    {
+      "name": "oversized-data-length",
+      "phase": "receiving-data",
+      "input": {
+        "headerHex": "0200010001"
+      },
+      "expected": "INVALID_FRAME"
+    },
+    {
+      "name": "uint32-max-frame-length",
+      "phase": "receiving-data",
+      "input": {
+        "headerHex": "02ffffffff"
+      },
+      "expected": "INVALID_FRAME",
+      "reason": "Reject from the 5-byte header before allocating the declared payload."
+    },
+    {
+      "name": "unknown-kind",
+      "phase": "receiving-data",
+      "input": {
+        "headerHex": "0300000001"
+      },
+      "expected": "INVALID_FRAME"
+    },
+    {
+      "name": "data-exceeds-remaining",
+      "phase": "receiving-data",
+      "receivedBytes": 1048575,
+      "input": {
+        "wireHex": "0200000002feff"
+      },
+      "expected": "SIZE_MISMATCH"
+    },
+    {
+      "name": "truncated-control",
+      "phase": "await-sender-hello",
+      "input": {
+        "wireHex": "01000000027b",
+        "then": "EOF"
+      },
+      "expected": "connection-failure",
+      "reason": "Payload promised 2 bytes but supplied 1; never successful."
+    },
+    {
+      "name": "invalid-utf8",
+      "phase": "await-sender-hello",
+      "input": {
+        "wireHex": "0100000002c328"
+      },
+      "expected": "INVALID_MESSAGE"
+    },
+    {
+      "name": "untrusted-tls-peer",
+      "phase": "before-hello",
+      "input": {
+        "peerPublicKeyPinnedByUser": false
+      },
+      "expected": "TLS-or-connection-abort",
+      "reason": "No HELLO, OFFER or DATA may be sent before authenticated trust succeeds."
+    },
+    {
+      "name": "complete-before-storage-commit",
+      "phase": "receiver-local-saving",
+      "input": {
+        "hashMatches": true,
+        "storageCommitSucceeded": false
+      },
+      "expected": "STORAGE_FAILED",
+      "reason": "Do not emit COMPLETE."
+    },
+    {
+      "name": "complete-hash-mismatch",
+      "phase": "sender-await-complete",
+      "input": {
+        "kind": 1,
+        "payloadUtf8": "{\"type\":\"COMPLETE\",\"transferId\":\"00112233445566778899aabbccddeeff00\",\"sizeBytes\":1048576,\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"}"
+      },
+      "expected": "HASH_MISMATCH"
+    }
+  ]
+}

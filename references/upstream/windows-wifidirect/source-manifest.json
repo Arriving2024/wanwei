@@ -1,0 +1,28 @@
+{
+  "usage": "Original files retained as references, not compiled directly; lifecycle and custom pairing flows adapted in Wanwei Windows. See THIRD_PARTY_NOTICES.md.",
+  "commit": "4eb2fcb499c5bc549e918920cfd2b64396a650d9",
+  "files": [
+    {
+      "url": "https://raw.githubusercontent.com/microsoft/Windows-universal-samples/4eb2fcb499c5bc549e918920cfd2b64396a650d9/Samples/WiFiDirect/cs/Scenario1_Advertiser.xaml.cs",
+      "sha256": "ADA9E3FD34B4F62F13226DF03EBF55CFB4BB5004F72B59FF39C192E4852E4A88",
+      "file": "Samples/WiFiDirect/cs/Scenario1_Advertiser.xaml.cs"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/microsoft/Windows-universal-samples/4eb2fcb499c5bc549e918920cfd2b64396a650d9/Samples/WiFiDirect/cs/Scenario2_Connector.xaml.cs",
+      "sha256": "D8AEE8B403FA4BA4A5482DCBE4FD8D13D7E9DC09E22001A883DBFCCF70FFDDFD",
+      "file": "Samples/WiFiDirect/cs/Scenario2_Connector.xaml.cs"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/microsoft/Windows-universal-samples/4eb2fcb499c5bc549e918920cfd2b64396a650d9/Samples/WiFiDirect/cs/ConnectionSettingsPanel.xaml.cs",
+      "sha256": "A3B35B8AC4335CDBEA8604867BA9D30CFAD798AA87AACACC0A18078DB6A4DCDE",
+      "file": "Samples/WiFiDirect/cs/ConnectionSettingsPanel.xaml.cs"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/microsoft/Windows-universal-samples/4eb2fcb499c5bc549e918920cfd2b64396a650d9/LICENSE",
+      "sha256": "693EC2093CED2CD46D24646644E9FCA8CB3B3EDCE928E6DF35522962E3175041",
+      "file": "LICENSE"
+    }
+  ],
+  "repository": "microsoft/Windows-universal-samples",
+  "retrievedDate": "2026-10-09"
+}

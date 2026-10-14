@@ -1,0 +1,23 @@
+{
+  "usage": "Reference source only; not compiled into Wanwei yet",
+  "commit": "88f7870b2c652922dc2afb01c076737e8bc50130",
+  "files": [
+    {
+      "url": "https://raw.githubusercontent.com/aosp-mirror/platform_development/88f7870b2c652922dc2afb01c076737e8bc50130/samples/WiFiDirectDemo/src/com/example/android/wifidirect/DeviceDetailFragment.java",
+      "sha256": "DF38291A7A6439D254030DDDA824EAE77B73379EAEC392BDAF329CC784CD23AE",
+      "file": "samples/WiFiDirectDemo/src/com/example/android/wifidirect/DeviceDetailFragment.java"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/aosp-mirror/platform_development/88f7870b2c652922dc2afb01c076737e8bc50130/samples/WiFiDirectDemo/src/com/example/android/wifidirect/WiFiDirectActivity.java",
+      "sha256": "B333CE739A49227888156135DAE0EFEDEE1C4D3EC26B67210E7CDFB28DD0AD5D",
+      "file": "samples/WiFiDirectDemo/src/com/example/android/wifidirect/WiFiDirectActivity.java"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/aosp-mirror/platform_development/88f7870b2c652922dc2afb01c076737e8bc50130/samples/WiFiDirectDemo/src/com/example/android/wifidirect/WiFiDirectBroadcastReceiver.java",
+      "sha256": "BC682F747CF722330497F4B6614555004A20DB254CF67B0E25C6D67D239C145B",
+      "file": "samples/WiFiDirectDemo/src/com/example/android/wifidirect/WiFiDirectBroadcastReceiver.java"
+    }
+  ],
+  "repository": "aosp-mirror/platform_development",
+  "retrievedDate": "2026-10-09"
+}

@@ -1,0 +1,37 @@
+{
+  "protocol": "wanwei-p0/0.1",
+  "status": "draft-vectors-not-device-validation",
+  "instructions": "These are separate terminal cases, not successive messages within one session.",
+  "cases": [
+    {
+      "name": "user-declined",
+      "phase": "receiver-await-user-confirmation",
+      "kind": 1,
+      "payloadUtf8": "{\"type\":\"REJECT\",\"transferId\":\"00112233445566778899aabbccddeeff00\",\"reason\":\"USER_DECLINED\"}",
+      "payloadByteLength": 92,
+      "headerHex": "010000005c",
+      "wireHex": "010000005c7b2274797065223a2252454a454354222c227472616e736665724964223a2230303131323233333434353536363737383839396161626263636464656566663030222c22726561736f6e223a22555345525f4445434c494e4544227d",
+      "expected": "valid terminal control message in the given state; close afterward"
+    },
+    {
+      "name": "error-before-offer",
+      "phase": "after-tls-before-valid-offer",
+      "kind": 1,
+      "payloadUtf8": "{\"type\":\"ERROR\",\"transferId\":null,\"code\":\"UNSUPPORTED_SERVICE\"}",
+      "payloadByteLength": 63,
+      "headerHex": "010000003f",
+      "wireHex": "010000003f7b2274797065223a224552524f52222c227472616e736665724964223a6e756c6c2c22636f6465223a22554e535550504f525445445f53455256494345227d",
+      "expected": "valid terminal control message in the given state; close afterward"
+    },
+    {
+      "name": "cancel-active-transfer",
+      "phase": "transferring",
+      "kind": 1,
+      "payloadUtf8": "{\"type\":\"ERROR\",\"transferId\":\"00112233445566778899aabbccddeeff00\",\"code\":\"CANCELLED\"}",
+      "payloadByteLength": 85,
+      "headerHex": "0100000055",
+      "wireHex": "01000000557b2274797065223a224552524f52222c227472616e736665724964223a2230303131323233333434353536363737383839396161626263636464656566663030222c22636f6465223a2243414e43454c4c4544227d",
+      "expected": "valid terminal control message in the given state; close afterward"
+    }
+  ]
+}

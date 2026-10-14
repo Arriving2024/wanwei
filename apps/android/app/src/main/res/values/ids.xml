@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="scan_nearby" type="id" />
+    <item name="stop_scan" type="id" />
+    <item name="pair_candidate_select" type="id" />
+    <item name="pair_prefer_phone_go" type="id" />
+    <item name="pair_connect" type="id" />
+    <item name="pair_cancel" type="id" />
+    <item name="pair_state" type="id" />
+    <item name="export_report" type="id" />
+</resources>

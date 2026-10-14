@@ -1,0 +1,21 @@
+Wanwei (万维计划)
+Copyright 2026 Wanwei contributors
+
+Original project source and documentation are licensed under Apache-2.0.
+Third-party material retains its original copyright and license.
+
+Microsoft Windows Universal Samples / WiFiDirect
+Copyright (c) Microsoft Corporation. MIT License.
+Selected lifecycle and custom-pairing flows have been adapted in the Windows app.
+The original reference files and license are in references/upstream/windows-wifidirect/.
+
+Android Open Source Project / WiFiDirectDemo
+Copyright (C) 2011 The Android Open Source Project. Apache License, Version 2.0.
+Reference source files are in references/upstream/android-wifidirect/.
+They are not compiled into the Android application.
+
+Gradle Wrapper
+Copyright Gradle, Inc. and contributors. Apache License, Version 2.0.
+Generated wrapper scripts retain their original license headers.
+
+See THIRD_PARTY_NOTICES.md for scope and provenance.

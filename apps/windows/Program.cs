@@ -1,0 +1,87 @@
+using System.Text;
+using System.Windows;
+
+namespace Wanwei;
+
+internal static class Program
+{
+    [STAThread]
+    public static int Main(string[] args)
+    {
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        try
+        {
+            var options = Options.Parse(args);
+            if (options.Mode == "self-test") return SelfTests.Run();
+            if (options.Mode is "probe" or "discover" or "advertise")
+            {
+                using var stop = new CancellationTokenSource();
+                Console.CancelKeyPress += (_, e) => { e.Cancel = true; stop.Cancel(); };
+                if (options.CancelAfterMs is not null) stop.CancelAfter(options.CancelAfterMs.Value);
+                var report = Task.Run(() => ProbeRunner.RunAsync(options.Mode == "discover" ? options.Seconds : null,
+                    stop.Token, advertisementSeconds: options.Mode == "advertise" ? options.Seconds : null)).GetAwaiter().GetResult();
+                string path = ReportStore.Save(report, options.Directory);
+                Console.WriteLine(path);
+                Console.WriteLine(ReportStore.Serialize(report));
+                return report.OperationOutcome == "failed" ? 2 : 0;
+            }
+            var app = new Application();
+            var window = new MainWindow(options.Directory);
+            if (options.Mode == "render-preview") { window.RenderPreview(options.PreviewPath!); return 0; }
+            if (options.Mode is "ui-smoke" or "ui-advertise-smoke" or "ui-pairing-smoke" or "ui-pairing-prompt-smoke")
+            {
+                int code = 0;
+                app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+                app.Startup += async (_, _) => {
+                    try {
+                        if (options.Mode == "ui-pairing-prompt-smoke") await window.PromptSmokeAsync(options.PreviewPath!);
+                        else Console.WriteLine(await window.SmokeAsync(options.PreviewPath!,
+                            options.Mode == "ui-advertise-smoke" ? options.Seconds : null,
+                            options.Mode == "ui-pairing-smoke" ? options.Seconds : null, options.CancelAfterMs));
+                    }
+                    catch (Exception ex) { Console.Error.WriteLine(DirectDiscovery.ErrorCode(ex)); code = 1; }
+                    finally { app.Shutdown(); }
+                };
+                app.Run();
+                return code;
+            }
+            app.Run(window);
+            return 0;
+        }
+        catch (ArgumentException ex) { Console.Error.WriteLine(ex.Message); return 64; }
+        catch (Exception ex) { Console.Error.WriteLine(DirectDiscovery.ErrorCode(ex)); return 1; }
+    }
+}
+
+internal sealed record Options(string Mode, int Seconds, string Directory, string? PreviewPath, int? CancelAfterMs)
+{
+    public static Options Parse(string[] args)
+    {
+        string mode = "gui";
+        string directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WanweiLab", "Reports");
+        string? preview = null; int seconds = 15; int? cancel = null;
+        bool modeSet = false;
+        for (int i = 0; i < args.Length; i++)
+        {
+            string Value() => ++i < args.Length ? args[i] : throw new ArgumentException("缺少参数值。");
+            switch (args[i])
+            {
+                case "--probe": case "--discover": case "--advertise": case "--self-test": case "--render-preview": case "--ui-smoke": case "--ui-advertise-smoke": case "--ui-pairing-smoke": case "--ui-pairing-prompt-smoke":
+                    if (modeSet) throw new ArgumentException("只允许一个运行模式。");
+                    mode = args[i][2..]; modeSet = true;
+                    if (mode is "render-preview" or "ui-smoke" or "ui-advertise-smoke" or "ui-pairing-smoke" or "ui-pairing-prompt-smoke") preview = Value();
+                    break;
+                case "--seconds":
+                    if (!int.TryParse(Value(), out seconds) || seconds is < 1 or > 60)
+                        throw new ArgumentException("无线操作时长必须为 1–60 秒。");
+                    break;
+                case "--out": directory = Path.GetFullPath(Value()); break;
+                case "--cancel-after-ms":
+                    if (!int.TryParse(Value(), out int ms) || ms is < 1 or > 60000) throw new ArgumentException("取消时间必须为 1–60000 毫秒。");
+                    cancel = ms; break;
+                default: throw new ArgumentException("未知参数。支持 --probe、--discover、--advertise、--seconds 15、--cancel-after-ms 1800、--out 目录、--self-test、--ui-pairing-smoke 预览路径。配对接受只在可见窗口进行。");
+            }
+        }
+        return new(mode, seconds, directory, preview, cancel);
+    }
+}
