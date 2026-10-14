@@ -16,11 +16,13 @@
 
 ## 使用与构建
 
+实验版下载：[GitHub 预发布页](https://github.com/Arriving2024/wanwei/releases/tag/lab-2026.10.14)。包含 Windows 便携 ZIP、Android Debug APK 和 SHA-256 校验文件；没有 Apple 安装包。
+
 - Windows：便携实验包完整解压后运行 `Wanwei.Windows.exe`；自行构建可运行根目录 `Start-Windows.cmd`。见 [构建说明](docs/building.md) 和 [便携包说明](docs/windows-portable-package.md)。
 - Android：使用 Android Studio 或 Gradle wrapper 构建 Debug APK，安装后名为“万维实验室”；[构建说明](docs/building.md) 列出 SDK 与权限要求。
 - iPhone / iPad：可在 Windows 编辑源码，在兼容的 Mac + Xcode 上编译、签名和真机调试。开发者模式不能代替 Mac 构建环境，见 [Apple 上机步骤](docs/apple-p0-quickstart.md)。
 
-仓库自动检查只验证构建和逻辑，不操作无线设备，不替代设备现场的确认、连接和保网验收。
+Windows、Android 与 Apple 不签名编译的首轮完整 [云端检查](https://github.com/Arriving2024/wanwei/actions/runs/38498065696) 已通过。自动检查只验证构建和逻辑，不操作无线设备，不替代设备现场的确认、连接和保网验收。
 
 ## 开发方向
 
