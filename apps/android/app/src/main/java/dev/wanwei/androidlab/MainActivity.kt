@@ -27,6 +27,7 @@ import android.provider.Settings
 import android.view.WindowInsets
 import android.widget.Button
 import android.widget.CheckBox
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -35,6 +36,7 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.security.SecureRandom
+import java.security.MessageDigest
 import java.time.Instant
 import java.util.Locale
 import java.util.UUID
@@ -42,7 +44,7 @@ import java.util.concurrent.Executors
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
-/** Native capability, discovery and user-confirmed Direct lab. No file or socket traffic. */
+/** Native Direct lab with opt-in, pinned mutual-TLS P0 synthetic file transfer. */
 class MainActivity : Activity() {
     private val handler = Handler(Looper.getMainLooper())
     private val writer = reportWriter
@@ -76,6 +78,41 @@ class MainActivity : Activity() {
     private lateinit var cancelPairButton: Button
     private lateinit var pairingText: TextView
     private lateinit var pairing: DirectPairingSession
+    private lateinit var fileExperimentCheckBox: CheckBox
+    private lateinit var localPinText: TextView
+    private lateinit var transferStateText: TextView
+    private lateinit var peerPinInput: EditText
+    private lateinit var remoteAddressInput: EditText
+    private lateinit var peerPortInput: EditText
+    private lateinit var trustPeerButton: Button
+    private lateinit var receiveTestButton: Button
+    private lateinit var sendTestButton: Button
+    private lateinit var cancelTransferButton: Button
+    private lateinit var acceptOfferButton: Button
+    private lateinit var rejectOfferButton: Button
+    private lateinit var identity: P0Identity
+    private lateinit var transfer: P0TransferSession
+    private var confirmedPeerPin: String? = null
+    private var offerPending = false
+    private lateinit var usbLabStateText: TextView
+    private var usbLabNonce: String? = null
+    private var usbLabPeerPin: String? = null
+    private var usbLabExpiresAtMs = 0L
+    private val consumedLabCommandIds = hashSetOf<String>()
+    private val consumedLabNonces = hashSetOf<String>()
+    private val labPump = object : Runnable {
+        override fun run() {
+            if (!started || destroyed) return
+            activateUsbLabIfRequested()
+            if (usbLabNonce != null) {
+                if (SystemClock.elapsedRealtime() >= usbLabExpiresAtMs) {
+                    deactivateUsbLab("expired")
+                    if (pairing.busy) pairing.cancel("usb_lab_window_expired")
+                } else consumeUsbLabCommand()
+            }
+            handler.postDelayed(this, 250)
+        }
+    }
     private val livePeers = linkedMapOf<String, Pair<WifiP2pDevice, Long>>()
     private var selectedPeerToken: String? = null
     private var pendingPairPermission = false
@@ -129,6 +166,8 @@ class MainActivity : Activity() {
             persistReport("pairing", allowAfterDestroy = true)
         }
         buildUi()
+        pairing.beforeCleanup = { if (::transfer.isInitialized) transfer.cancel("DIRECT_PATH_UNVERIFIED") }
+        prepareIdentity()
         initializeP2p()
         probeCapabilities()
     }
@@ -136,6 +175,12 @@ class MainActivity : Activity() {
     override fun onSaveInstanceState(outState: Bundle) {
         exportSnapshot?.let { outState.putString(PENDING_EXPORT_STATE, it) }
         super.onSaveInstanceState(outState)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (started) activateUsbLabIfRequested()
     }
 
     override fun onStart() {
@@ -155,6 +200,8 @@ class MainActivity : Activity() {
         requestP2pState()
         handler.removeCallbacks(gateRefresh)
         handler.post(gateRefresh)
+        handler.removeCallbacks(labPump)
+        handler.post(labPump)
     }
 
     override fun onResume() {
@@ -164,10 +211,14 @@ class MainActivity : Activity() {
 
     override fun onStop() {
         started = false
+        intent?.removeExtra("wanwei_lab_nonce")
         handler.removeCallbacks(gateRefresh)
+        handler.removeCallbacks(labPump)
+        deactivateUsbLab("activity_stopped")
         pendingPermissionScan = false
         if (scanning) finishScan("activity_stopped", "界面离开前台，已结束本次扫描。")
         pendingPairPermission = false
+        if (::transfer.isInitialized) transfer.cancel("CANCELLED")
         if (pairing.awaitingSystemNegotiation) pairing.noteLifecycle("activity_stopped_during_bounded_system_negotiation")
         else if (pairing.busy) pairing.cancel("activity_stopped")
         if (registered) {
@@ -178,6 +229,8 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        deactivateUsbLab("activity_destroyed")
+        if (::transfer.isInitialized) transfer.cancel("CANCELLED")
         pairing.cancel("activity_destroyed")
         if (scanning) finishScan("activity_destroyed", "界面关闭，已结束本次扫描。")
         // A closing Activity cannot wait indefinitely for the platform's stop callback.
@@ -583,21 +636,22 @@ class MainActivity : Activity() {
     }
 
     private fun makeReport(kind: String): String = JSONObject()
-        .put("schema", "wanwei.android.p0.v1").put("appVersion", "0.2.5")
+        .put("schema", "wanwei.android.p0.v1").put("appVersion", "0.3.0")
         .put("kind", kind).put("generatedAtUtc", Instant.now().toString())
         .put("runId", runId).put("runStartedAtUtc", startedAt).put("capabilityProbe", probe)
         .put("scan", currentScan ?: JSONObject.NULL)
         .put("pairing", pairing.report() ?: JSONObject.NULL)
         .put("evidenceBoundary", JSONObject().put("capabilityProbeExecuted", true)
             .put("pairingImplemented", true).put("actualDirectConnectionObserved", pairing.report()?.optBoolean("actualConnectionObserved") ?: false)
-            .put("applicationIdentityAuthenticated", false).put("fileTransferImplemented", false)
+            .put("applicationIdentityAuthenticated", false).put("fileTransferImplemented", true)
+            .put("applicationTransferEvidence", "files/reports/latest-transfer.json")
             .put("originalWifiPreservationVerified", false).put("crossPlatformCompatibilityVerified", false)
             .put("screenSharingImplemented", false)
             .put("notes", "Feature flags and API availability do not prove interoperability. Discovery may return cached peers. Default-network snapshots do not prove the original AP was retained."))
         .put("privacy", JSONObject().put("candidateToken", "HMAC-SHA256 truncated to 48 bits, random key for this activity run, key not persisted")
             .put("rawMacStored", false).put("ssidStored", false).put("candidateNameStored", false)
-            .put("rawDeviceIdStored", false).put("applicationPayloadSent", false)
-            .put("notes", "Android system discovery/pairing management traffic is expected; this application opens no data sockets and sends no file payload."))
+            .put("rawDeviceIdStored", false).put("applicationPayloadSent", JSONObject.NULL)
+            .put("notes", "Discovery and pairing reports do not report file success. Opt-in pinned mutual-TLS synthetic file traffic has separate latest-transfer.json evidence; no user files or private keys are exported."))
         .toString(2)
 
     private fun persistReport(kind: String, allowAfterDestroy: Boolean = false) {
@@ -710,18 +764,27 @@ class MainActivity : Activity() {
             connection.addView(this, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
         }
         addText(connection, "默认关闭。开启后请求由手机建立直连；若对端也要求由它建立，协商可能失败。实际角色和频段以报告为准，不保证 5 GHz，也不代表 Wi-Fi 7 多链路聚合。", 12f, muted, false, 4)
+        fileExperimentCheckBox = CheckBox(this).apply {
+            id = R.id.pair_file_experiment
+            text = "开启 1 MiB 文件实验 · 连接窗口 180 秒"
+            textSize = 14f; setTextColor(Color.WHITE)
+            buttonTintList = android.content.res.ColorStateList.valueOf(accent)
+            isChecked = false; isSaveEnabled = false
+            connection.addView(this, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
+        }
         selectPeerButton = button(connection, "选择附近候选") { choosePeer() }
         selectPeerButton.id = R.id.pair_candidate_select
         connectButton = button(connection, "确认并连接 · 最长 45 秒", true) { requestPairing() }
         connectButton.id = R.id.pair_connect
         cancelPairButton = button(connection, "结束本次连接") { pairing.cancel() }
         cancelPairButton.id = R.id.pair_cancel
-        addText(connection, "本次只测配对、实际接口和原 Wi-Fi 变化。连接建立后观察 20 秒并自动释放。系统确认窗口遮挡页面时继续有限等待；关闭页面请求释放。", 12f, muted, false, 12)
-        val evidence = card("04  诊断记录")
+        addText(connection, "默认连接后观察 20 秒；明确开启文件实验时最多 180 秒。系统确认窗口遮挡页面时继续有限等待；关闭页面会停止文件任务并请求释放。", 12f, muted, false, 12)
+        buildTransferUi()
+        val evidence = card("05  诊断记录")
         reportText = addText(evidence, "准备本机报告……", 13f, muted, false, 12)
         exportButton = button(evidence, "导出 JSON 报告") { exportReport() }
         exportButton.id = R.id.export_report
-        addText(evidence, "当前版本：0.2.5。配对建链与保网观测已实现，是否成功以报告为准。应用身份认证、文件互传、互联网连续性、全平台互通和投屏尚未验证。", 13f, Color.rgb(242, 205, 142), false, 14)
+        addText(evidence, "当前版本：0.3.0。P0 只传合成的 1 MiB 测试文件。公钥和监听端口需线下交换，每次收文件必须明确接受；真机互通结果以两端报告为准。", 13f, Color.rgb(242, 205, 142), false, 14)
         button(content, "系统定位设置") { openSettings(Settings.ACTION_LOCATION_SOURCE_SETTINGS) }
         button(content, "应用权限设置") {
             try {
@@ -763,8 +826,24 @@ class MainActivity : Activity() {
         exportButton.isEnabled = !scanning && !stopping && !pairing.busy
         selectPeerButton.isEnabled = idle && livePeers.isNotEmpty()
         preferPhoneGoCheckBox.isEnabled = idle
+        fileExperimentCheckBox.isEnabled = idle
         connectButton.isEnabled = idle && selectedPeerToken != null
         cancelPairButton.isEnabled = pairing.busy && !pairing.isStopping
+        if (::receiveTestButton.isInitialized) {
+            val transferring = ::transfer.isInitialized && transfer.busy
+            val path = pairing.verifiedTransferPath()
+            val trusted = confirmedPeerPin != null && peerPinInput.text.toString().trim().lowercase(Locale.ROOT) == confirmedPeerPin
+            trustPeerButton.isEnabled = ::identity.isInitialized && !transferring
+            peerPinInput.isEnabled = !transferring
+            peerPortInput.isEnabled = !transferring
+            remoteAddressInput.isEnabled = !transferring
+            receiveTestButton.isEnabled = ::transfer.isInitialized && !transferring && path != null && trusted
+            sendTestButton.isEnabled = receiveTestButton.isEnabled
+            cancelTransferButton.isEnabled = transferring
+            acceptOfferButton.isEnabled = transferring && offerPending
+            rejectOfferButton.isEnabled = transferring && offerPending
+            if (path != null && !path.localIsOwner && remoteAddressInput.text.isBlank()) remoteAddressInput.setText(path.groupOwnerAddress)
+        }
         if (DirectPairingSession.radioGate.locked()) pairingText.text = "上次系统释放未确认，当前进程已锁定新的扫描和连接。请先结束系统 Direct 连接并重新打开应用。"
         else if (DirectPairingSession.radioGate.occupied() && !scanning && !stopping && !pairing.busy)
             pairingText.text = "上一页面的实验仍在清理，请等待结束后重试。"
@@ -803,17 +882,201 @@ class MainActivity : Activity() {
         val selected = livePeers[token] ?: return
         if (locationEnabled() == false) { pairingText.text = "系统定位开关关闭，请先开启再试；否则候选和 AP 诊断可能不可用。"; return }
         val preferPhoneGroupOwner = preferPhoneGoCheckBox.isChecked
+        val fileExperiment = fileExperimentCheckBox.isChecked
+        val usbLabExperiment = usbLabNonce != null && SystemClock.elapsedRealtime() < usbLabExpiresAtMs
         val roleSummary = if (preferPhoneGroupOwner)
             "本次实验：优先由手机建立直连。若对端也要求由它建立，协商可能失败。实际角色和频段以报告为准，不保证 5 GHz，也不代表多链路聚合。"
         else "本次模式：系统默认协商两端角色和频段。"
         AlertDialog.Builder(this).setTitle("连接这个附近候选？")
-            .setMessage("候选 $token\n$roleSummary\n请先在电脑打开“允许本次配对”。本次请求系统 Direct 连接并观察原 Wi-Fi；不会发送文件。若已有 Direct 组，将保留原组并拒绝本次实验。")
+            .setMessage("候选 $token\n$roleSummary\n请先在电脑打开“等待连接请求”。本次请求系统 Direct 连接并观察原 Wi-Fi；${if (fileExperiment) "文件实验窗口为 180 秒，收发仍需另行确认完整公钥和每次文件请求。" else "观察窗口为 20 秒。"}若已有 Direct 组，将保留原组并拒绝本次实验。")
             .setPositiveButton("确认连接") { _, _ ->
                 if (started && !pairing.busy && !scanning && !stopping && hasDiscoveryPermission()) {
-                    pairing.start(selected.first, token, selected.second, preferPhoneGroupOwner)
+                    pairing.start(selected.first, token, selected.second, preferPhoneGroupOwner, fileExperiment, usbLabExperiment)
                     updateButtons()
                 }
             }.setNegativeButton("取消", null).show()
+    }
+
+    private fun prepareIdentity() {
+        val worker = Executors.newSingleThreadExecutor()
+        worker.execute {
+            try {
+                val prepared = P0Identity()
+                val report = JSONObject().put("schema", "wanwei-public-identity/0.1").put("appVersion", "0.3.0")
+                    .put("identity", prepared.fingerprint).put("identityEncoding", "sha256_der_subject_public_key_info_lowercase_hex")
+                    .put("keyStore", "AndroidKeyStore_non_exportable_private_key")
+                    .put("certificateDerBase64", android.util.Base64.encodeToString(prepared.certificate.encoded, android.util.Base64.NO_WRAP))
+                val directory = File(filesDir, "reports").apply { mkdirs() }
+                FileOutputStream(File(directory, "public-identity.json")).use { it.write(report.toString(2).toByteArray()); it.fd.sync() }
+                handler.post {
+                    if (!destroyed) {
+                        identity = prepared
+                        transfer = P0TransferSession(this, identity, pairing::verifiedTransferPath) { update ->
+                            handler.post {
+                                if (!destroyed) {
+                                    transferStateText.text = update.message
+                                    offerPending = update.offerPending
+                                    updateButtons()
+                                }
+                            }
+                        }
+                        localPinText.text = "本机完整公钥指纹（64 位）：\n${identity.fingerprint}"
+                        confirmedPeerPin = getSharedPreferences("p0-trust", MODE_PRIVATE).getString("peerPin", null)
+                        confirmedPeerPin?.let(peerPinInput::setText)
+                        updateButtons()
+                    }
+                }
+            } catch (error: Exception) {
+                handler.post { if (!destroyed) { transferStateText.text = "身份准备失败：${error.javaClass.simpleName}。文件实验保持关闭。"; updateButtons() } }
+            } finally { worker.shutdown() }
+        }
+    }
+
+    private fun buildTransferUi() {
+        val card = card("04  安全文件实验 · 1 MiB")
+        usbLabStateText = addText(card, "普通手动确认模式。", 13f, accent, true, 12).apply { id = R.id.usb_lab_state }
+        localPinText = addText(card, "正在准备本机受保护的应用身份……", 13f, Color.WHITE, false, 12).apply {
+            id = R.id.transfer_local_pin; setTextIsSelectable(true)
+        }
+        addText(card, "通过当面比对或已授权 USB 调试渠道，交换双方完整 64 位指纹，再确认信任。端口也要线下交给对方；这一步目前是实验操作。", 12f, muted, false, 8)
+        fun input(idValue: Int, hintValue: String, numeric: Boolean = false): EditText = EditText(this).apply {
+            id = idValue; hint = hintValue; textSize = 14f; setTextColor(Color.WHITE); setHintTextColor(muted)
+            inputType = if (numeric) android.text.InputType.TYPE_CLASS_NUMBER else android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            isSaveEnabled = false
+            card.addView(this, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        }
+        peerPinInput = input(R.id.transfer_peer_pin, "对方完整公钥指纹（64 位）")
+        trustPeerButton = button(card, "核对并确认这个公钥") {
+            val pin = peerPinInput.text.toString().trim().lowercase(Locale.ROOT)
+            if (!P0Protocol.fingerprint.matches(pin)) { transferStateText.text = "请输入完整 64 位十六进制公钥指纹。"; return@button }
+            if (::identity.isInitialized && pin == identity.fingerprint) { transferStateText.text = "这是本机公钥，请输入对方页面显示的完整公钥指纹。"; return@button }
+            AlertDialog.Builder(this).setTitle("确认线下核对的对端公钥")
+                .setMessage("请核对对端本机页面或已授权 USB 渠道导出的完整指纹：\n$pin\n确认后只允许持有这个公钥对应私钥的对端完成 TLS 认证。")
+                .setPositiveButton("已核对，确认信任") { _, _ ->
+                    confirmedPeerPin = pin
+                    getSharedPreferences("p0-trust", MODE_PRIVATE).edit().putString("peerPin", pin).apply()
+                    transferStateText.text = "公钥已确认。先开启文件实验并建链，再选择发送或等待接收。"
+                    updateButtons()
+                }.setNegativeButton("取消", null).show()
+        }.apply { id = R.id.transfer_trust_peer }
+        remoteAddressInput = input(R.id.transfer_remote_address, "对方本次直连 IPv4 地址")
+        peerPortInput = input(R.id.transfer_peer_port, "对方本次接收端口", true)
+        transferStateText = addText(card, "先开启文件实验、建立 Direct 并核对完整公钥。", 14f, Color.WHITE, false, 12).apply { id = R.id.transfer_state }
+        receiveTestButton = button(card, "等待接收 1 MiB 测试文件", true) {
+            if (::transfer.isInitialized && confirmedPeerPin != null) transfer.startReceiver(confirmedPeerPin!!)
+            updateButtons()
+        }.apply { id = R.id.transfer_listen }
+        sendTestButton = button(card, "发送 1 MiB 测试文件", true) {
+            val port = peerPortInput.text.toString().toIntOrNull()
+            if (port == null || port !in 1..65535) { transferStateText.text = "请输入对方页面显示的本次接收端口。"; return@button }
+            if (::transfer.isInitialized && confirmedPeerPin != null) transfer.startSender(confirmedPeerPin!!, remoteAddressInput.text.toString().trim(), port)
+            updateButtons()
+        }.apply { id = R.id.transfer_send }
+        acceptOfferButton = button(card, "接受本次 1 MiB 测试文件", true) { offerPending = false; transfer.acceptOffer(true); updateButtons() }.apply { id = R.id.transfer_accept }
+        rejectOfferButton = button(card, "拒绝本次测试文件") { offerPending = false; transfer.acceptOffer(false); updateButtons() }.apply { id = R.id.transfer_reject }
+        cancelTransferButton = button(card, "取消本次文件实验") { transfer.cancel(); updateButtons() }.apply { id = R.id.transfer_cancel }
+    }
+
+    private fun activateUsbLabIfRequested() {
+        val requestedNonce = intent?.getStringExtra("wanwei_lab_nonce") ?: return
+        if (!::identity.isInitialized || !::transfer.isInitialized || confirmedPeerPin == null) return
+        intent.removeExtra("wanwei_lab_nonce") // No implicit reactivation after onStop or another onStart.
+        if (usbLabNonce != null || pairing.busy || consumedLabNonces.contains(requestedNonce)) {
+            writeUsbLabStatus("activation_rejected", "busy_or_nonce_replayed")
+            return
+        }
+        try {
+            if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) == 0) P0Protocol.fail("INVALID_MESSAGE")
+            val file = File(filesDir, "p0-lab-bootstrap.json")
+            val bytes = readPrivateLabFile(file)
+            android.system.Os.remove(file.path)
+            val bootstrap = P0UsbLabPolicy.bootstrap(bytes, requestedNonce, confirmedPeerPin!!)
+            if (bootstrap.peerPin == identity.fingerprint) P0Protocol.fail("IDENTITY_MISMATCH")
+            consumedLabNonces.add(bootstrap.nonce)
+            usbLabNonce = bootstrap.nonce; usbLabPeerPin = bootstrap.peerPin
+            usbLabExpiresAtMs = SystemClock.elapsedRealtime() + 600_000
+            consumedLabCommandIds.clear()
+            fileExperimentCheckBox.isChecked = true
+            usbLabStateText.text = "USB 辅助固定数据实验已启用：仅已核对的对端、1 MiB 合成文件；600 秒到期或离开页面停止。"
+            writeUsbLabStatus("active", "explicit_debug_private_bootstrap")
+            updateButtons()
+        } catch (error: Exception) {
+            writeUsbLabStatus("activation_rejected", if (error is P0Protocol.Failure) error.code else error.javaClass.simpleName)
+        }
+    }
+
+    private fun deactivateUsbLab(reason: String) {
+        if (usbLabNonce == null) return
+        if (::transfer.isInitialized) transfer.cancel("CANCELLED")
+        writeUsbLabStatus("disabled", reason)
+        usbLabNonce = null; usbLabPeerPin = null; usbLabExpiresAtMs = 0L
+        if (::usbLabStateText.isInitialized) usbLabStateText.text = "USB 固定数据实验已停止；恢复普通手动确认模式。"
+    }
+
+    private fun consumeUsbLabCommand() {
+        val nonce = usbLabNonce ?: return
+        val file = File(filesDir, "p0-lab-command.json")
+        if (!file.exists()) return
+        var command: P0UsbLabPolicy.Command? = null
+        try {
+            val bytes = readPrivateLabFile(file)
+            android.system.Os.remove(file.path) // Consume BEFORE executing; failed commands cannot replay.
+            command = P0UsbLabPolicy.command(bytes, nonce)
+            if (consumedLabCommandIds.size >= 128 || !consumedLabCommandIds.add(command.commandId)) P0Protocol.fail("INVALID_MESSAGE")
+            if (confirmedPeerPin != usbLabPeerPin || peerPinInput.text.toString().trim().lowercase(Locale.ROOT) != usbLabPeerPin) P0Protocol.fail("IDENTITY_MISMATCH")
+            val pin = usbLabPeerPin ?: P0Protocol.fail("IDENTITY_MISMATCH")
+            when (command.action) {
+                "cancel" -> transfer.cancel("CANCELLED")
+                "acceptfixedfixture" -> {
+                    if (pairing.verifiedTransferPath() == null || !transfer.acceptFixedFixtureByOperator()) P0Protocol.fail("UNEXPECTED_MESSAGE")
+                }
+                "receive", "send" -> {
+                    if (transfer.busy) P0Protocol.fail("UNEXPECTED_MESSAGE")
+                    if (pairing.verifiedTransferPath() == null) P0Protocol.fail("DIRECT_PATH_UNVERIFIED")
+                    if (command.action == "receive") transfer.startReceiver(pin, operatorPreauthorized = true)
+                    else transfer.startSender(pin, command.peerAddress!!, command.port!!, operatorPreauthorized = true)
+                }
+            }
+            writeUsbLabStatus("command_executed", "accepted_for_bounded_fixture_task", command)
+            updateButtons()
+        } catch (error: Exception) {
+            runCatching { if (file.exists()) android.system.Os.remove(file.path) }
+            writeUsbLabStatus("command_rejected", if (error is P0Protocol.Failure) error.code else error.javaClass.simpleName, command)
+        }
+    }
+
+    private fun readPrivateLabFile(file: File): ByteArray {
+        if (Build.VERSION.SDK_INT < 29) P0Protocol.fail("INVALID_MESSAGE") // P0 requires platform TLS 1.3.
+        val fd = android.system.Os.open(file.path, android.system.OsConstants.O_RDONLY or android.system.OsConstants.O_NOFOLLOW or android.system.OsConstants.O_CLOEXEC, 0)
+        try {
+            val stat = android.system.Os.fstat(fd)
+            if (!android.system.OsConstants.S_ISREG(stat.st_mode) || stat.st_size !in 1..P0UsbLabPolicy.MAXIMUM_BYTES.toLong()) P0Protocol.fail("INVALID_MESSAGE")
+            val bytes = ByteArray(P0UsbLabPolicy.MAXIMUM_BYTES + 1); var count = 0
+            while (count < bytes.size) {
+                val read = android.system.Os.read(fd, bytes, count, bytes.size - count)
+                if (read == 0) break
+                count += read
+            }
+            if (count !in 1..P0UsbLabPolicy.MAXIMUM_BYTES) P0Protocol.fail("INVALID_MESSAGE")
+            return bytes.copyOf(count)
+        } finally { android.system.Os.close(fd) }
+    }
+
+    private fun writeUsbLabStatus(state: String, reason: String, command: P0UsbLabPolicy.Command? = null) {
+        val nonce = usbLabNonce
+        val token = nonce?.let { MessageDigest.getInstance("SHA-256").digest(it.toByteArray(Charsets.US_ASCII)).joinToString("") { byte -> "%02x".format(byte.toInt() and 255) } }
+        val report = JSONObject().put("schema", P0UsbLabPolicy.SCHEMA).put("state", state).put("reason", reason)
+            .put("updatedAtUtc", Instant.now().toString()).put("sessionToken", token ?: JSONObject.NULL)
+            .put("commandId", command?.commandId ?: JSONObject.NULL).put("action", command?.action ?: JSONObject.NULL)
+            .put("fixture", P0Protocol.FIXTURE).put("operatorFixturePreauthorized", nonce != null && state != "disabled")
+            .put("nativeFileExperimentWindowMs", 600_000).put("fileSessionAbsoluteLimitMs", 180_000)
+            .put("commandsCannotChangeRadioOrSettings", true)
+        runCatching {
+            val directory = File(filesDir, "reports").apply { mkdirs() }
+            val temporary = File(directory, "lab-status.json.tmp")
+            FileOutputStream(temporary).use { it.write(report.toString(2).toByteArray(Charsets.UTF_8)); it.fd.sync() }
+            if (!temporary.renameTo(File(directory, "lab-status.json"))) throw java.io.IOException("lab_status_commit_failed")
+        }
     }
 
     private fun card(title: String): LinearLayout = LinearLayout(this).apply {

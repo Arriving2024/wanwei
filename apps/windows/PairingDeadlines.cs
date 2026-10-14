@@ -5,9 +5,10 @@ internal sealed class PairingDeadlines
 {
     internal const int NegotiationLimitMs = 45_000;
     internal const int ObservationLimitMs = 20_000;
+    internal int ObservationBudgetMs { get; }
     private readonly List<PairingPhaseEvidence> phases = [];
     internal int WaitLimitMs { get; }
-    internal int MaximumRunMs => WaitLimitMs + NegotiationLimitMs + ObservationLimitMs;
+    internal int MaximumRunMs => WaitLimitMs + NegotiationLimitMs + ObservationBudgetMs;
     internal string Phase { get; private set; } = "not_started";
     internal string? EndReason { get; private set; }
     internal long? PublisherStartedElapsedMs { get; private set; }
@@ -16,10 +17,12 @@ internal sealed class PairingDeadlines
     internal bool Running => Phase is "waiting_for_request" or "negotiating" or "observing";
     internal long? DeadlineElapsedMs => phases.Count == 0 ? null : phases[^1].DeadlineElapsedMs;
 
-    internal PairingDeadlines(int waitSeconds)
+    internal PairingDeadlines(int waitSeconds, int observationSeconds = 20)
     {
         if (waitSeconds is < 1 or > 60) throw new ArgumentOutOfRangeException(nameof(waitSeconds));
+        if (observationSeconds is not (20 or 180 or 600)) throw new ArgumentOutOfRangeException(nameof(observationSeconds));
         WaitLimitMs = waitSeconds * 1_000;
+        ObservationBudgetMs = observationSeconds * 1_000;
     }
 
     internal bool Start(long now)
@@ -41,7 +44,7 @@ internal sealed class PairingDeadlines
     internal bool TryObserveConnection(long now)
     {
         if (Phase != "negotiating" || !BeforeDeadline(now)) return false;
-        Enter("observing", now, ObservationLimitMs);
+        Enter("observing", now, ObservationBudgetMs);
         return true;
     }
 
@@ -66,7 +69,7 @@ internal sealed class PairingDeadlines
     }
 
     internal PairingTimingEvidence Snapshot() => new(WaitLimitMs, NegotiationLimitMs,
-        ObservationLimitMs, MaximumRunMs, PublisherStartedElapsedMs, OverallDeadlineElapsedMs,
+        ObservationBudgetMs, MaximumRunMs, PublisherStartedElapsedMs, OverallDeadlineElapsedMs,
         EndedElapsedMs, EndReason, phases.ToArray());
 
     private bool BeforeDeadline(long now) => Running && now >= phases[^1].StartedElapsedMs &&

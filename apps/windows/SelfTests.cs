@@ -168,10 +168,11 @@ internal static class SelfTests
             Check("pre-cancel pairing releases common session guard", !WirelessSessionGate.RestartRequired);
         }
         Check("report does not claim app authentication", json.Contains("System pairing does not authenticate"));
-        Check("report cannot claim transfer", json.Contains("\"transfer\": \"not_implemented\""));
+        Check("native report defers transfer claim to explicit P0 evidence", json.Contains("\"transfer\": \"separate_opt_in_P0_report\""));
         Check("report cannot claim internet continuity", json.Contains("\"internetContinuity\": \"not_tested\""));
         Check("report cannot claim iOS interoperability", json.Contains("\"iosWindowsInterop\": \"unverified\""));
-        Console.WriteLine($"{passed} local logic checks passed. No radio interoperability was tested by these checks.");
+        P0SelfTests.Run(Check);
+        Console.WriteLine($"{passed} local checks passed including authenticated TLS loopback. No radio interoperability was tested by these checks.");
         return 0;
     }
 

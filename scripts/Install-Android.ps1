@@ -1,7 +1,11 @@
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
+$appConfiguration = Get-Content -LiteralPath (Join-Path $projectRoot 'apps\android\app\build.gradle.kts') -Raw
+$versionMatch = [regex]::Match($appConfiguration, 'versionName\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"')
+if (-not $versionMatch.Success) { throw 'Android application version missing or invalid.' }
+$appVersion = $versionMatch.Groups[1].Value
 $adb = Join-Path $projectRoot '.tools\android-sdk\platform-tools\adb.exe'
-$apk = Join-Path $projectRoot 'artifacts\android\wanwei-android-lab-0.2.5-debug.apk'
+$apk = Join-Path $projectRoot "artifacts\android\wanwei-android-lab-$appVersion-debug.apk"
 if (-not (Test-Path -LiteralPath $adb)) { throw 'Project Android platform-tools missing.' }
 if (-not (Test-Path -LiteralPath $apk)) { throw 'APK missing. Run scripts/Build-Android.ps1 first.' }
 
@@ -18,4 +22,4 @@ if ($LASTEXITCODE -ne 0 -or ($state -join "`n").Trim() -ne 'device') {
 if ($LASTEXITCODE -ne 0) { throw 'APK installation failed. Existing application data has not been deleted.' }
 & $adb -d shell am start -W -n 'dev.wanwei.androidlab/.MainActivity'
 if ($LASTEXITCODE -ne 0) { throw 'APK was installed but could not be opened.' }
-Write-Host 'Wanwei Android Lab 0.2.5 opened. Nearby-device permission is used for discovery/pairing; optional precise-location permission enables anonymous original-AP diagnostics.'
+Write-Host "Wanwei Android Lab $appVersion opened. Nearby-device permission is used for discovery/pairing; optional precise-location permission enables anonymous original-AP diagnostics."

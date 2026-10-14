@@ -103,13 +103,21 @@ $readme = @"
 本包包含所需 .NET 运行时，不要求另装 .NET SDK；优先支持 Windows 11 x64。
 Windows 的无线网卡、驱动和系统接口仍须支持对应功能。
 
-已实现：本机能力检查、附近设备发现、用户确认后的系统配对/直连实验、诊断报告。
-尚未实现：文件传输、应用身份认证、速度测试、iOS 互通、多链路聚合。
+已实现：本机能力检查、发现、系统配对/直连、诊断，以及固定 1 MiB 合成文件实验。
+文件实验使用 TLS 1.3 双向认证、完整公钥指纹绑定、实际 P2P 地址和安全保存。
+Windows 与手机的物理文件互传、普通确认流程和负载下保网仍待验收。
+尚不支持选择用户文件；速度测试、iOS 互通、多链路聚合和投屏仍待开发或验证。
 它是实验室工具，不是已经完成的隔空投送产品；不能保证所有网卡保留原 Wi-Fi。
 若系统提示连接将断开现有 WLAN，请拒绝并结束该轮实验。
 
+普通文件实验需线下核对完整 64 位公钥指纹、交换本次监听端口，并逐次接受接收请求。
+开发调试入口 --usb-p0-lab 需显式固定数据预授权，仅用于已核对对端的 1 MiB 合成文件。
+USB 只交换控制信息；文件仍必须走原生无线 Direct 路径，不能改走普通局域网。
+辅助实验的预授权在报告中与人工点击区分，不代表一键发现、确认和收发已经验收。
+
 程序不安装驱动、服务或开机启动项。关闭窗口后程序退出。
 报告默认保存在 %LOCALAPPDATA%\WanweiLab\Reports，包含诊断和匿名观测信息。
+原始设备报告、受保护身份文件、私钥、实验 nonce 和个人媒体留在本地，不公开上传。
 本包未作代码签名，Windows 可能显示未知发布者；没有伪造签名或绕过安全设置。
 
 LICENSE 为项目许可；SOURCE-THIRD-PARTY-NOTICES.md 是原工程来源记录，
@@ -144,8 +152,9 @@ foreach ($entry in $fileManifest) {
     if ((Get-FileHash -LiteralPath (Join-Path $unpackedRoot $entry.path) -Algorithm SHA256).Hash -ne $entry.sha256) { throw "ZIP verification failed for $($entry.path)" }
 }
 
-# Run only the pre-existing local logic checks. They do not start discovery,
-# advertisements, pairing, a GUI, or socket transfers. Use the extracted EXE.
+# Run local checks, including bounded loopback TLS/fixture checks. They do not
+# start wireless discovery, advertisements, pairing, a GUI, or device transfers.
+# Use the extracted EXE.
 $tracePath = Join-Path $buildRoot 'self-test-host-trace.txt'
 $startInfo = New-Object Diagnostics.ProcessStartInfo
 $startInfo.FileName = Join-Path $unpackedRoot 'Wanwei.Windows.exe'
@@ -172,7 +181,7 @@ $stdout = $stdoutTask.GetAwaiter().GetResult()
 $stderr = $stderrTask.GetAwaiter().GetResult()
 [IO.File]::WriteAllText((Join-Path $buildRoot 'self-test.stdout.txt'), $stdout, [Text.UTF8Encoding]::new($false))
 [IO.File]::WriteAllText((Join-Path $buildRoot 'self-test.stderr.txt'), $stderr, [Text.UTF8Encoding]::new($false))
-if ($process.ExitCode -ne 0 -or $stdout -notmatch '(\d+) local logic checks passed') { throw "Extracted EXE self-test failed. See $buildRoot" }
+if ($process.ExitCode -ne 0 -or $stdout -notmatch '(\d+) local (?:logic )?checks passed') { throw "Extracted EXE self-test failed. See $buildRoot" }
 $testCount = [int]$Matches[1]
 $hostTrace = Get-Content -LiteralPath $tracePath -Raw
 if (-not $hostTrace.Contains((Join-Path $unpackedRoot 'coreclr.dll'))) { throw 'The host trace did not confirm the bundled runtime was loaded.' }

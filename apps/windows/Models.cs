@@ -51,6 +51,8 @@ public sealed record PairingSessionResult(string Outcome, bool StartAttempted, b
     IReadOnlyList<DirectEndpointEvidence> EndpointPairs, IReadOnlyList<PairingEvent> Events, string? Error)
 {
     public PairingTimingEvidence? Timing { get; init; }
+    public bool OperatorFixturePreauthorized { get; init; }
+    public string AppPairingDecisionSource => OperatorFixturePreauthorized ? "explicit_cli_USB_fixed_fixture_lab" : "visible_UI_confirmation";
     public string ApplicationIdentity { get; } = "not_authenticated";
     public string EndpointSource { get; } = "WiFiDirectDevice.GetConnectionEndpointPairs";
     public string ReleaseMeaning { get; } = "this_app_owned_objects_released;_OS_disconnect_not_proven";
@@ -59,7 +61,7 @@ public sealed record PairingSessionResult(string Outcome, bool StartAttempted, b
 public sealed class LabReport
 {
     public string Schema { get; } = "wanwei.windows.probe/1";
-    public string AppVersion { get; } = "0.2.2";
+    public string AppVersion { get; } = "0.3.0";
     public string RunId { get; } = Guid.NewGuid().ToString("N");
     public DateTimeOffset StartedUtc { get; } = DateTimeOffset.UtcNow;
     public string Os { get; } = Environment.OSVersion.VersionString;
@@ -74,7 +76,7 @@ public sealed class LabReport
     public string SampledApContinuity { get; set; } = "not_tested";
     public string Pairing => PairingSession?.SystemPairingStatus ?? "not_tested";
     public string DirectDataPath { get; } = "not_tested";
-    public string Transfer { get; } = "not_implemented";
+    public string Transfer { get; } = "separate_opt_in_P0_report";
     public string InternetContinuity { get; } = "not_tested";
     public string IosWindowsInterop { get; } = "unverified";
     public string[] Limits { get; } = [
@@ -86,7 +88,7 @@ public sealed class LabReport
         "The OS may retain pairing, including after cancellation; this app never removes existing OS pairing.",
         "Endpoint pairs and a connected status are direct API evidence, not a successful data transfer.",
         "Releasing this app's connection object does not prove the OS or other applications disconnected.",
-        "No listening socket, file transfer, or LAN fallback is implemented."
+        "Only the opt-in P0 experiment opens a socket on a verified native Direct address; see its separate transfer report. No LAN fallback."
     ];
 }
 

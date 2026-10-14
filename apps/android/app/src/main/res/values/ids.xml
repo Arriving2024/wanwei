@@ -8,4 +8,17 @@
     <item name="pair_cancel" type="id" />
     <item name="pair_state" type="id" />
     <item name="export_report" type="id" />
+    <item name="pair_file_experiment" type="id" />
+    <item name="transfer_local_pin" type="id" />
+    <item name="transfer_peer_pin" type="id" />
+    <item name="transfer_trust_peer" type="id" />
+    <item name="transfer_remote_address" type="id" />
+    <item name="transfer_peer_port" type="id" />
+    <item name="transfer_state" type="id" />
+    <item name="transfer_listen" type="id" />
+    <item name="transfer_send" type="id" />
+    <item name="transfer_accept" type="id" />
+    <item name="transfer_reject" type="id" />
+    <item name="transfer_cancel" type="id" />
+    <item name="usb_lab_state" type="id" />
 </resources>

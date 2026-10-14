@@ -20,6 +20,7 @@ import java.net.NetworkInterface
 import java.time.Instant
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicReference
 
 /** User-confirmed, bounded Direct experiment. Radio callbacks and JSON mutation run on the main looper. */
 internal class DirectPairingSession(context: Context,
@@ -59,6 +60,11 @@ internal class DirectPairingSession(context: Context,
     private var removeAccepted = false
     private var absenceSince = 0L
     private var connected = false
+    private var fileExperiment = false
+    private var usbLabFileExperiment = false
+    private val directPath = AtomicReference<P0DirectPath?>(null)
+    var beforeCleanup: (() -> Unit)? = null
+    fun verifiedTransferPath(): P0DirectPath? = directPath.get()
     var busy = false
         private set
     private var localRetryLocked = false
@@ -95,12 +101,15 @@ internal class DirectPairingSession(context: Context,
     fun noteLifecycle(kind: String) { if (busy) { event(kind); notifyChange("系统确认期间继续等待，最迟 45 秒结束建链。") } }
 
     fun start(target: WifiP2pDevice, candidateToken: String, seenAtElapsedMs: Long,
-              preferPhoneGroupOwner: Boolean = false) {
+              preferPhoneGroupOwner: Boolean = false, enableFileExperiment: Boolean = false,
+              enableUsbLabFileExperiment: Boolean = false) {
         if (busy || retryLocked || !radioGate.acquire(ownerId)) return
         busy = true; attempt++; evidenceQuery++
         startedMs = SystemClock.elapsedRealtime(); stoppingAt = 0L
         targetAddress = target.deviceAddress
         requestedGroupOwnerIntent = if (preferPhoneGroupOwner) 15 else -1
+        fileExperiment = enableFileExperiment; directPath.set(null)
+        usbLabFileExperiment = fileExperiment && enableUsbLabFileExperiment
         preflightClear = false; connectIssued = false; accepted = null; connected = false
         rediscoveryIssued = false; rediscoveryAccepted = false; rediscoveryStopConfirmed = false; peerQueryPending = false
         rediscoveryStopPending = false
@@ -116,9 +125,11 @@ internal class DirectPairingSession(context: Context,
             .put("requestedGroupOwnerIntent", requestedGroupOwnerIntent)
             .put("rolePreferenceMode", if (preferPhoneGroupOwner) "prefer_phone_group_owner" else "platform_default")
             .put("rolePreferenceNotes", "The opt-in experiment requests maximum group owner intent. Negotiation may fail if the peer also requires the group owner role. This is not a 5 GHz request or Wi-Fi 7 MLO configuration. Only observed group role and frequency are evidence of the resulting connection.")
-            .put("requestedNegotiationTimeoutMs", 45_000).put("connectedObservationWindowMs", 20_000)
+            .put("requestedNegotiationTimeoutMs", 45_000).put("connectedObservationWindowMs", if (usbLabFileExperiment) 600_000 else if (fileExperiment) 180_000 else 20_000)
+            .put("fileExperimentOptIn", fileExperiment)
+            .put("debugUsbFixtureLabOptIn", usbLabFileExperiment)
             .put("cleanupTimeoutMs", 10_000).put("events", events).put("connectionSamples", connectionSamples)
-            .put("notes", "Only an explicit candidate selection and confirmation can initiate connect. A connect acceptance callback is not a connection. System pairing is not application identity authentication. No file or socket traffic is implemented.")
+            .put("notes", "Only an explicit candidate selection and confirmation can initiate connect. A connect acceptance callback is not a connection. System pairing is not application identity authentication. Opt-in P0 has separate full-key trust, TLS and per-offer acceptance.")
         observer = WifiObservation(app, handler).also { it.start() }
         startTicks()
         val address = targetAddress
@@ -386,6 +397,18 @@ internal class DirectPairingSession(context: Context,
             record?.put("actualP2pEndpointAvailable", true)?.put("endpointAvailableAtUtc", Instant.now().toString())
                 ?.put("endpointGroup", JSONObject(groupJson(group).toString()))
         } else if (!connected) record?.put("actualP2pEndpointAvailable", false)
+        if (usable && fileExperiment) {
+            try {
+                val iface = NetworkInterface.getByName(group.`interface`)
+                val local = iface?.interfaceAddresses?.firstOrNull { it.address is java.net.Inet4Address && !it.address.isLoopbackAddress }
+                if (local != null) directPath.set(P0DirectPath(record!!.getString("id"), group.`interface`, local.address.hostAddress!!,
+                    local.networkPrefixLength.toInt(), info.groupOwnerAddress.hostAddress!!, group.isGroupOwner,
+                    signature(group), SystemClock.elapsedRealtime())) else directPath.set(null)
+            } catch (error: Exception) {
+                directPath.set(null)
+                event("transfer_path_read_failed").put("errorType", error.javaClass.simpleName)
+            }
+        } else directPath.set(null)
         if (!connected) {
             connected = true
             baselineGroupSignature = signature(group)
@@ -396,13 +419,15 @@ internal class DirectPairingSession(context: Context,
                 ?.put("establishedGroup", JSONObject(groupJson(group).toString()))
             event("actual_group_and_connection_observed")
             val thisAttempt = attempt
-            setPhaseTimer(20_000) { if (busy && attempt == thisAttempt && stoppingAt == 0L) cancel("observation_window_completed") }
-            notifyChange("实际 Direct 连接已建立。观察原 Wi-Fi 20 秒后自动结束；本版本尚不传文件。")
+            setPhaseTimer(if (usbLabFileExperiment) 600_000 else if (fileExperiment) 180_000 else 20_000) { if (busy && attempt == thisAttempt && stoppingAt == 0L) cancel("observation_window_completed") }
+            notifyChange(if (usbLabFileExperiment) "USB 辅助固定数据实验：实际 Direct 已建立，连接窗口最多 600 秒；每个 TLS 文件任务仍最多 180 秒。" else if (fileExperiment) "实际 Direct 连接已建立。文件实验窗口最多 180 秒；请核对公钥并通过下方测试收发。" else "实际 Direct 连接已建立。观察原 Wi-Fi 20 秒后自动结束。")
         }
     }
 
     fun cancel(reason: String = "cancelled_by_user") {
         if (!busy || stoppingAt != 0L) return
+        directPath.set(null)
+        beforeCleanup?.invoke()
         clearPhaseTimer(); callbackTimer?.let(handler::removeCallbacks)
         stoppingAt = SystemClock.elapsedRealtime()
         record?.put("state", "stopping")?.put("finishReason", reason)?.put("cleanup", JSONObject().put("state", "checking"))
@@ -610,6 +635,8 @@ internal class DirectPairingSession(context: Context,
     }
     private fun finish(cleanupState: String, message: String) {
         if (!busy) return
+        directPath.set(null)
+        beforeCleanup?.invoke()
         busy = false; evidenceQuery++
         clearPhaseTimer()
         tick?.let(handler::removeCallbacks); cleanupTimer?.let(handler::removeCallbacks); callbackTimer?.let(handler::removeCallbacks)

@@ -88,7 +88,7 @@ public static class ProbeRunner
             report.Advertisement?.Outcome is "failed" or "stop_unconfirmed" or "stopped_unexpectedly" ||
             report.PairingSession?.Outcome is "failed" or "release_unconfirmed" or "pairing_failed" or "connection_failed" or "stage_timeout" or "connected_without_endpoints" ? "failed" :
             cancellation.IsCancellationRequested ? "cancelled" : "completed";
-        progress?.Invoke("本次操作结束。原 Wi-Fi 样本不代表互联网连续可用；本版本尚未实现文件传输。");
+        progress?.Invoke("本次操作结束。原 Wi-Fi 样本不代表互联网连续可用；文件实验结果在独立传输报告中。");
         return report;
     }
 

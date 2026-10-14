@@ -26,7 +26,10 @@ internal static class Program
                 return report.OperationOutcome == "failed" ? 2 : 0;
             }
             var app = new Application();
-            var window = new MainWindow(options.Directory);
+            P0UsbLabBootstrap? lab = options.LabBootstrapPath is null ? null : P0UsbLabBootstrap.Load(options.LabBootstrapPath);
+            lab?.ConsumeAuthorization(options.Directory);
+            var window = new MainWindow(options.Directory, lab);
+            if (lab is not null) window.Loaded += async (_, _) => await window.StartUsbFixtureLabAsync(options.Seconds);
             if (options.Mode == "render-preview") { window.RenderPreview(options.PreviewPath!); return 0; }
             if (options.Mode is "ui-smoke" or "ui-advertise-smoke" or "ui-pairing-smoke" or "ui-pairing-prompt-smoke")
             {
@@ -49,29 +52,33 @@ internal static class Program
             return 0;
         }
         catch (ArgumentException ex) { Console.Error.WriteLine(ex.Message); return 64; }
-        catch (Exception ex) { Console.Error.WriteLine(DirectDiscovery.ErrorCode(ex)); return 1; }
+        catch (Exception ex) { Console.Error.WriteLine(args.Contains("--self-test") ? ex.Message : DirectDiscovery.ErrorCode(ex)); return 1; }
     }
 }
 
-internal sealed record Options(string Mode, int Seconds, string Directory, string? PreviewPath, int? CancelAfterMs)
+internal sealed record Options(string Mode, int Seconds, string Directory, string? PreviewPath, int? CancelAfterMs, string? LabBootstrapPath = null)
 {
     public static Options Parse(string[] args)
     {
         string mode = "gui";
         string directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WanweiLab", "Reports");
         string? preview = null; int seconds = 15; int? cancel = null;
-        bool modeSet = false;
+        bool modeSet = false, secondsSet = false; string? labBootstrap = null;
         for (int i = 0; i < args.Length; i++)
         {
             string Value() => ++i < args.Length ? args[i] : throw new ArgumentException("缺少参数值。");
             switch (args[i])
             {
+                case "--usb-p0-lab":
+                    if (modeSet) throw new ArgumentException("只允许一个运行模式。");
+                    mode = "usb-p0-lab"; modeSet = true; labBootstrap = Path.GetFullPath(Value()); break;
                 case "--probe": case "--discover": case "--advertise": case "--self-test": case "--render-preview": case "--ui-smoke": case "--ui-advertise-smoke": case "--ui-pairing-smoke": case "--ui-pairing-prompt-smoke":
                     if (modeSet) throw new ArgumentException("只允许一个运行模式。");
                     mode = args[i][2..]; modeSet = true;
                     if (mode is "render-preview" or "ui-smoke" or "ui-advertise-smoke" or "ui-pairing-smoke" or "ui-pairing-prompt-smoke") preview = Value();
                     break;
                 case "--seconds":
+                    secondsSet = true;
                     if (!int.TryParse(Value(), out seconds) || seconds is < 1 or > 60)
                         throw new ArgumentException("无线操作时长必须为 1–60 秒。");
                     break;
@@ -82,6 +89,7 @@ internal sealed record Options(string Mode, int Seconds, string Directory, strin
                 default: throw new ArgumentException("未知参数。支持 --probe、--discover、--advertise、--seconds 15、--cancel-after-ms 1800、--out 目录、--self-test、--ui-pairing-smoke 预览路径。配对接受只在可见窗口进行。");
             }
         }
-        return new(mode, seconds, directory, preview, cancel);
+        if (mode == "usb-p0-lab" && !secondsSet) seconds = 60;
+        return new(mode, seconds, directory, preview, cancel, labBootstrap);
     }
 }

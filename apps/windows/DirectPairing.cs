@@ -15,6 +15,10 @@ public interface IPairingUi
     Task<PairingDecision> ConfirmAsync(PairingPrompt prompt, CancellationToken cancellation);
     // The implementation must begin FromIdAsync on its live STA UI dispatcher.
     Task<IAsyncOperation<WiFiDirectDevice>> BeginConnectionAsync(string deviceId, CancellationToken cancellation);
+    int ObservationSeconds => 20;
+    bool FixtureLabPreauthorized => false;
+    bool NativePeerAllowed(string deviceId, string? deviceAddress) => true;
+    Task<bool> OnDirectConnectedAsync(IReadOnlyList<DirectEndpointEvidence> endpoints, Func<bool> pathVerified, CancellationToken cancellation) => Task.FromResult(true);
 }
 
 internal sealed class DirectPairing
@@ -49,7 +53,7 @@ internal sealed class DirectPairing
     {
         this.privacy = privacy; this.ui = ui; this.progress = progress;
         lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-        deadlines = new(waitSeconds);
+        deadlines = new(waitSeconds, ui.ObservationSeconds);
         deadlineTimer = new(_ => DeadlineElapsed(), null, Timeout.Infinite, Timeout.Infinite);
     }
 
@@ -79,7 +83,7 @@ internal sealed class DirectPairing
             if (active && !lifetime.IsCancellationRequested && deadlines.Start(clock.ElapsedMilliseconds))
             {
                 RecordDeadlineLocked();
-                progress?.Invoke($"等待手机发起连接，最多 {deadlines.WaitLimitMs / 1_000} 秒。收到首请求后，两个确认和系统协商另计 45 秒；连接成功后观察 20 秒。");
+                progress?.Invoke($"等待手机发起连接，最多 {deadlines.WaitLimitMs / 1_000} 秒。收到首请求后，两个确认和系统协商另计 45 秒；连接成功后观察 {deadlines.ObservationBudgetMs / 1000} 秒。");
             }
             // A request can arrive before the Started callback is dispatched. Start() is
             // one-shot: the later callback cannot move negotiation back to waiting.
@@ -189,6 +193,8 @@ internal sealed class DirectPairing
         try
         {
             var information = request.DeviceInformation;
+            string? deviceAddress = information.Properties.TryGetValue("System.Devices.Aep.DeviceAddress", out var address) ? address as string : null;
+            if (!ui.NativePeerAllowed(information.Id, deviceAddress)) { outcome = "rejected"; Record("request", "native_peer_policy_rejected"); return; }
             peerToken = privacy.Token("pairing_peer", information.Id);
             alreadyPaired = information.Pairing?.IsPaired;
             Record("request", "user_confirmation_required");
@@ -196,8 +202,8 @@ internal sealed class DirectPairing
             lifetime.Token.ThrowIfCancellationRequested();
             if (!decision.Accept) { outcome = "rejected"; Record("request", "user_rejected"); return; }
             lock (gate) if (!MayNegotiateLocked()) return;
-            userAccepted = true;
-            Record("request", "user_accepted");
+            userAccepted = !ui.FixtureLabPreauthorized;
+            Record("request", ui.FixtureLabPreauthorized ? "operator_fixture_preauthorized" : "user_accepted");
             if (alreadyPaired == true) systemPairingStatus = "AlreadyPaired";
             else
             {
@@ -257,8 +263,15 @@ internal sealed class DirectPairing
             connected = true;
             outcome = endpoints.Length == 0 ? "connected_without_endpoints" : "connected_observed";
             progress?.Invoke(endpoints.Length == 0
-                ? "系统报告 Direct 已连接，实际端点尚未取得；此版本不传文件。"
-                : "系统报告 Direct 已连接并取得实际端点。已进入独立 20 秒观察；此版本不传文件。");
+                ? "系统报告 Direct 已连接，实际端点尚未取得，禁止传输。"
+                : $"系统报告 Direct 已连接并取得实际端点。进入独立 {deadlines.ObservationBudgetMs / 1000} 秒观察。");
+            if (endpoints.Length > 0 && ui.ObservationSeconds >= 180)
+            {
+                DirectEndpointEvidence[] retained = endpoints.ToArray();
+                bool transferReleased = await ui.OnDirectConnectedAsync(retained, () => VerifyRetainedPath(createdDevice, retained), lifetime.Token).ConfigureAwait(false);
+                if (!transferReleased) { releaseConfirmed = false; error ??= "P0_TRANSFER_CLEANUP_UNCONFIRMED"; }
+                return;
+            }
             await Task.Delay(Timeout.InfiniteTimeSpan, lifetime.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { Record("request", "cancel_or_deadline"); }
@@ -305,7 +318,7 @@ internal sealed class DirectPairing
                         args.Accept(decision.Pin!);
                     }
                     else args.Accept();
-                    Record("pairing_prompt", "user_accepted");
+                    Record("pairing_prompt", ui.FixtureLabPreauthorized ? "operator_fixture_preauthorized" : "user_accepted");
                 }
             }
             catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { Record("pairing_prompt", "cancel_or_deadline"); }
@@ -343,7 +356,7 @@ internal sealed class DirectPairing
                         return;
                     }
                     RecordDeadlineLocked();
-                    progress?.Invoke("实际连接已观察到，进入独立 20 秒观察。重复连接通知不会延长本阶段。");
+                    progress?.Invoke($"实际连接已观察到，进入独立 {deadlines.ObservationBudgetMs / 1000} 秒观察。重复连接通知不会延长本阶段。");
                 }
                 connected = true;
                 endpoints = sender.GetConnectionEndpointPairs().Select(p => new DirectEndpointEvidence(
@@ -353,6 +366,21 @@ internal sealed class DirectPairing
                 Record("endpoints", endpoints.Length.ToString());
             }
             else if (connected) { outcome = "disconnected_observed"; progress?.Invoke("系统报告本次 Direct 连接已断开。"); sessionEnded.TrySetResult(); }
+        }
+    }
+
+    private bool VerifyRetainedPath(WiFiDirectDevice expectedDevice, DirectEndpointEvidence[] expected)
+    {
+        lock (gate)
+        {
+            if (!active || lifetime.IsCancellationRequested || sessionEnded.Task.IsCompleted || !ReferenceEquals(device, expectedDevice)) return false;
+            try
+            {
+                if (expectedDevice.ConnectionStatus != WiFiDirectConnectionStatus.Connected) return false;
+                var current = expectedDevice.GetConnectionEndpointPairs().Select(p => new DirectEndpointEvidence(p.LocalHostName?.CanonicalName ?? "", p.LocalServiceName ?? "", p.RemoteHostName?.CanonicalName ?? "", p.RemoteServiceName ?? "")).ToArray();
+                return expected.All(e => current.Any(c => c.LocalAddress == e.LocalAddress && c.RemoteAddress == e.RemoteAddress));
+            }
+            catch { return false; }
         }
     }
 
@@ -487,7 +515,7 @@ internal sealed class DirectPairing
             return new(outcome, startAttempted, startedObserved, configured, finalPublisher, stopConfirmed,
                 releaseConfirmed, clock.ElapsedMilliseconds, received, released, extraRejected, peerToken,
                 alreadyPaired, systemPairingStatus, userAccepted, connected, connectionStatus, endpoints, events.ToArray(), error)
-                { Timing = deadlines.Snapshot() };
+                { Timing = deadlines.Snapshot(), OperatorFixturePreauthorized = ui.FixtureLabPreauthorized };
         }
     }
 

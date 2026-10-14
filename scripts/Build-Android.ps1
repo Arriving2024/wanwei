@@ -1,5 +1,9 @@
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
+$appConfiguration = Get-Content -LiteralPath (Join-Path $projectRoot 'apps\android\app\build.gradle.kts') -Raw
+$versionMatch = [regex]::Match($appConfiguration, 'versionName\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"')
+if (-not $versionMatch.Success) { throw 'Android application version missing or invalid.' }
+$appVersion = $versionMatch.Groups[1].Value
 $javaDir = Get-ChildItem -LiteralPath (Join-Path $projectRoot '.tools\java') -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'bin\java.exe') } | Select-Object -First 1
 if (-not $javaDir) { throw 'Project JDK missing. Use the standard SDK and Gradle wrapper described in docs/building.md.' }
 $env:JAVA_HOME = $javaDir.FullName
@@ -28,14 +32,21 @@ try {
     $testClasspath = @($junitJar.FullName, $hamcrestJar.FullName, $kotlinJar.FullName,
         (Join-Path $projectRoot 'apps\android\app\build\tmp\kotlin-classes\debug'),
         (Join-Path $projectRoot 'apps\android\app\build\tmp\kotlin-classes\debugUnitTest')) -join ';'
-    & (Join-Path $javaDir.FullName 'bin\java.exe') '-cp' $testClasspath 'org.junit.runner.JUnitCore' 'dev.wanwei.androidlab.PairingSafetyTest'
+    $testClasses = @(Get-ChildItem -LiteralPath (Join-Path $projectRoot 'apps\android\app\src\test') -Recurse -File -Filter '*Test.kt' | ForEach-Object {
+        $testSource = Get-Content -LiteralPath $_.FullName -Raw
+        $packageMatch = [regex]::Match($testSource, '(?m)^package\s+([A-Za-z0-9_.]+)\s*$')
+        if (-not $packageMatch.Success) { throw 'Host test package missing.' }
+        $packageMatch.Groups[1].Value + '.' + $_.BaseName
+    })
+    if ($testClasses.Count -eq 0) { throw 'No Android host policy tests found.' }
+    & (Join-Path $javaDir.FullName 'bin\java.exe') '-cp' $testClasspath 'org.junit.runner.JUnitCore' @testClasses
     if ($LASTEXITCODE -ne 0) { throw 'Android host policy tests failed.' }
     $apk = Join-Path $projectRoot 'apps\android\app\build\outputs\apk\debug\app-debug.apk'
     $outputDirectory = Join-Path $projectRoot 'artifacts\android'
     New-Item -ItemType Directory -Force $outputDirectory | Out-Null
-    Copy-Item -LiteralPath $apk -Destination (Join-Path $outputDirectory 'wanwei-android-lab-0.2.5-debug.apk')
+    Copy-Item -LiteralPath $apk -Destination (Join-Path $outputDirectory "wanwei-android-lab-$appVersion-debug.apk")
     $signer = Join-Path $env:ANDROID_HOME 'build-tools\36.0.0\apksigner.bat'
     & $signer verify --verbose $apk
     if ($LASTEXITCODE -ne 0) { throw 'Android APK signature validation failed.' }
-    Get-FileHash -LiteralPath (Join-Path $outputDirectory 'wanwei-android-lab-0.2.5-debug.apk') -Algorithm SHA256
+    Get-FileHash -LiteralPath (Join-Path $outputDirectory "wanwei-android-lab-$appVersion-debug.apk") -Algorithm SHA256
 } finally { Pop-Location }

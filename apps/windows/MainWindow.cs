@@ -29,11 +29,21 @@ public sealed class MainWindow : Window, IPairingUi
     private bool restartRequired;
     private bool rejectAllRequests;
     private Border? pairingPrompt;
+    private readonly CheckBox transferExperiment = new() { Content = "实验：1 MiB 安全互传 · 连接最多保留 180 秒", Margin = new Thickness(0, 5, 0, 5), Foreground = Brushes.LightBlue };
+    private readonly P0Identity identity;
+    private bool transferEnabledForRun;
+    private readonly P0UsbLabBootstrap? labBootstrap;
+    private bool labRunStarted;
+    private bool labRunConsumed;
 
-    public MainWindow(string reportDirectory)
+    public MainWindow(string reportDirectory) : this(reportDirectory, null) { }
+    internal MainWindow(string reportDirectory, P0UsbLabBootstrap? labBootstrap)
     {
         this.reportDirectory = reportDirectory;
+        this.labBootstrap = labBootstrap;
+        identity = P0Identity.Load(); identity.ExportPublic(reportDirectory);
         Title = "万维计划 · Windows 直连实验室";
+        if (labBootstrap is not null) Title += " · USB 预授权 1 MiB 实验";
         Width = 1060; Height = 820; MinWidth = 900; MinHeight = 700;
         Background = Brush("#0C1323"); Foreground = Brush("#F4F7FF");
         FontFamily = new FontFamily("Microsoft YaHei UI");
@@ -44,7 +54,7 @@ public sealed class MainWindow : Window, IPairingUi
         Content = root;
 
         var header = new DockPanel { Margin = new Thickness(0, 0, 0, 24) };
-        var tag = Text("WINDOWS  /  P0.2.2", 12, "#84B9FF");
+        var tag = Text("WINDOWS  /  P0.3.0", 12, "#84B9FF");
         tag.VerticalAlignment = VerticalAlignment.Center;
         DockPanel.SetDock(tag, Dock.Right); header.Children.Add(tag);
         header.Children.Add(Text("万维计划", 24, "#FFFFFF"));
@@ -53,15 +63,18 @@ public sealed class MainWindow : Window, IPairingUi
         var intro = new StackPanel { Margin = new Thickness(0, 0, 0, 22) };
         intro.Children.Add(Text("让附近设备建立直连。", 31, "#F4F7FF"));
         intro.Children.Add(Text("目标：附近直连，高速传输，保留原 Wi-Fi。", 15, "#BACBE3", new Thickness(0, 10, 0, 0)));
-        var boundary = Text("当前可测试系统配对与连接；应用身份认证和文件传输尚未实现。", 13, "#FFCB88", new Thickness(0, 8, 0, 0));
+        var boundary = Text("可选 1 MiB 合成文件互传实验：完整指纹确认、双方认证、收件确认及哈希校验。真机互传待验收。", 13, "#FFCB88", new Thickness(0, 8, 0, 0));
         intro.Children.Add(boundary);
+        if (labBootstrap is not null) intro.Children.Add(Text("USB 实验预授权已开启：仅一次连接、最多两次固定 1 MiB 数据。仅应用确认自动处理；PIN 与系统 WLAN 冲突仍需人工处理。连接最多 600 秒，可随时停止。", 13, "#FFCB88", new Thickness(0, 8, 0, 0)));
         Grid.SetRow(intro, 1); root.Children.Add(intro);
 
         var actionArea = new StackPanel { Margin = new Thickness(0, 0, 0, 20) };
         var buttons = new WrapPanel();
         foreach (var button in new[] { probe, scan, advertise, pair, stop, export }) buttons.Children.Add(button);
         stop.IsEnabled = false; export.IsEnabled = false;
+        if (labBootstrap is not null) probe.IsEnabled = scan.IsEnabled = advertise.IsEnabled = pair.IsEnabled = transferExperiment.IsEnabled = false;
         actionArea.Children.Add(buttons);
+        actionArea.Children.Add(transferExperiment);
         actionArea.Children.Add(state); state.Margin = new Thickness(0, 18, 0, 5);
         hint.TextWrapping = TextWrapping.Wrap; actionArea.Children.Add(hint);
         Grid.SetRow(actionArea, 2); root.Children.Add(actionArea);
@@ -76,7 +89,7 @@ public sealed class MainWindow : Window, IPairingUi
         Grid.SetRow(body, 3); root.Children.Add(body);
 
         details.Text = "等待检查。\n\n将读取：\n• Windows 接口是否存在、能否调用\n• 无线网卡驱动能力\n• 原 Wi-Fi 的连接状态\n\n接口存在不等于硬件支持；驱动标志不等于跨端互通。";
-        activity.Text = "扫描附近设备，或短时允许本机被发现。\n\n点击“等待连接请求”后，最多等待 60 秒。收到首请求后，两次确认与建立连接另计 45 秒；连接成功后观察 20 秒再结束。可随时停止。\n\n普通广播继续拒绝连接请求。系统可能保留配对记录；万维应用身份仍未验证。此版本不收发文件。";
+        activity.Text = "扫描附近设备，或短时允许本机被发现。\n\n点击“等待连接请求”后，最多等待 60 秒。收到首请求后，两次确认与建立连接另计 45 秒；默认观察 20 秒。勾选互传实验后，连接最多保留 180 秒并打开测试窗口。可随时停止。\n\n系统配对不代替万维应用身份验证；传文件须当面确认完整公钥指纹和收件。";
         var footer = Text("本次报告使用临时匿名标识；不保存 SSID、BSSID 或附近设备名称。", 12, "#8395B0", new Thickness(0, 17, 0, 0));
         Grid.SetRow(footer, 4); root.Children.Add(footer);
 
@@ -91,12 +104,20 @@ public sealed class MainWindow : Window, IPairingUi
             e.Cancel = true; closeWhenDone = true; operation.Cancel();
             state.Text = "正在停止本次无线操作，随后关闭…";
         };
+        Closed += (_, _) => identity.Dispose();
     }
 
     private async Task RunAsync(int? seconds, int? advertisementSeconds = null, int? pairingSeconds = null, int? cancelAfterMs = null)
     {
         if (operation is not null || restartRequired) return;
+        if (labBootstrap is not null)
+        {
+            if (labRunConsumed || seconds is not null || advertisementSeconds is not null || pairingSeconds is null) return;
+            labRunConsumed = true;
+        }
         operation = new();
+        transferEnabledForRun = pairingSeconds is not null && transferExperiment.IsChecked == true;
+        transferExperiment.IsEnabled = false;
         probe.IsEnabled = scan.IsEnabled = advertise.IsEnabled = pair.IsEnabled = export.IsEnabled = false;
         if (cancelAfterMs is not null) operation.CancelAfter(cancelAfterMs.Value);
         stop.IsEnabled = true;
@@ -124,13 +145,15 @@ public sealed class MainWindow : Window, IPairingUi
         finally
         {
             operation.Dispose(); operation = null;
+            transferEnabledForRun = false;
             if (DirectAdvertisement.RestartRequired)
             {
                 restartRequired = true;
                 state.Text = "本次无线资源释放尚未确认";
                 hint.Text = "请导出报告，关闭程序后重新打开。当前禁止启动第二次无线操作。";
             }
-            probe.IsEnabled = scan.IsEnabled = advertise.IsEnabled = pair.IsEnabled = !restartRequired; stop.IsEnabled = false;
+            probe.IsEnabled = scan.IsEnabled = advertise.IsEnabled = pair.IsEnabled = !restartRequired && labBootstrap is null; stop.IsEnabled = false;
+            transferExperiment.IsEnabled = !restartRequired && labBootstrap is null;
             if (closeWhenDone) Close();
         }
     }
@@ -189,7 +212,7 @@ public sealed class MainWindow : Window, IPairingUi
                 "disconnected_observed" => "本次连接已断开",
                 _ => "本次配对或连接尚未完成"
             };
-            result.Text = pairing.ConnectedObserved ? "系统曾报告 Direct 已连接 · 应用身份未认证" : "尚未观察到实际 Direct 连接";
+            result.Text = pairing.ConnectedObserved ? "系统曾报告 Direct 已连接 · 互传实验结果见独立报告" : "尚未观察到实际 Direct 连接";
             activity.AppendText($"\n配对模式：{pairing.Outcome}\n系统配对结果：{pairing.SystemPairingStatus}\n连接最终样本：{pairing.FinalConnectionStatus}\n");
             activity.AppendText($"请求：{pairing.RequestsReceived}；已释放：{pairing.RequestsReleased}；额外拒绝：{pairing.ExtraRequestsRejected}\n");
             if (pairing.Timing is { } timing)
@@ -198,7 +221,7 @@ public sealed class MainWindow : Window, IPairingUi
             foreach (var endpoint in pairing.EndpointPairs)
                 activity.AppendText($"实际 Direct 端点：{endpoint.LocalAddress} → {endpoint.RemoteAddress}\n");
             if (pairing.Error is not null) activity.AppendText("错误：" + pairing.Error + "\n");
-            activity.AppendText("未进行应用身份认证或传输；本应用释放对象不代表系统已删除配对或所有连接已断开。\n");
+            activity.AppendText("传输结果另见 latest-transfer.json；本应用释放对象不代表系统已删除配对或所有连接已断开。\n");
         }
         hint.Text = report.SampledApContinuity == "same_at_observed_samples"
             ? "采样点的原接入点一致；尚未证明采样间无中断，也未测试传输时保网。"
@@ -222,6 +245,14 @@ public sealed class MainWindow : Window, IPairingUi
         // Smoke runs use the actual STA dispatcher but always decline requests.
         if (rejectAllRequests) return new(false);
         cancellation.ThrowIfCancellationRequested();
+        if (labBootstrap is not null)
+        {
+            bool accepted = prompt.Kind is "ConnectionRequest" or "ConfirmOnly";
+            await Dispatcher.InvokeAsync(() => {
+                activity.AppendText($"USB 固定文件实验预授权：{prompt.Kind} · {(accepted ? "已接受应用提示" : "拒绝 PIN 或未支持提示")}\n");
+            });
+            return new(accepted);
+        }
         var decision = new TaskCompletionSource<PairingDecision>(TaskCreationOptions.RunContinuationsAsynchronously);
         Border? surface = null;
         await Dispatcher.InvokeAsync(() => {
@@ -274,6 +305,35 @@ public sealed class MainWindow : Window, IPairingUi
     public async Task<Windows.Foundation.IAsyncOperation<WiFiDirectDevice>> BeginConnectionAsync(string deviceId, CancellationToken cancellation)
     {
         return await BeginOnUiAsync(() => WiFiDirectDevice.FromIdAsync(deviceId), cancellation);
+    }
+    public int ObservationSeconds => labBootstrap is not null ? 600 : transferEnabledForRun ? 180 : 20;
+    public bool FixtureLabPreauthorized => labBootstrap is not null;
+    public bool NativePeerAllowed(string deviceId, string? deviceAddress) => labBootstrap?.AllowsNativePeer(deviceId, deviceAddress) ?? true;
+    internal async Task StartUsbFixtureLabAsync(int seconds)
+    {
+        if (labBootstrap is null || labRunStarted) return;
+        labRunStarted = true;
+        await RunAsync(null, pairingSeconds: seconds);
+    }
+    public async Task<bool> OnDirectConnectedAsync(IReadOnlyList<DirectEndpointEvidence> endpoints, Func<bool> pathVerified, CancellationToken cancellation)
+    {
+        if (labBootstrap is not null)
+        {
+            var path = P0Path.Create(endpoints, pathVerified);
+            var controller = new P0UsbLabController(labBootstrap, identity, reportDirectory, line => Dispatcher.BeginInvoke(() => {
+                activity.AppendText(line + "\n"); activity.ScrollToEnd();
+            }));
+            return await controller.RunAsync(path, cancellation).ConfigureAwait(false);
+        }
+        P0TransferWindow? window = null;
+        await Dispatcher.InvokeAsync(() => {
+            cancellation.ThrowIfCancellationRequested();
+            var path = P0Path.Create(endpoints, pathVerified);
+            window = new(identity, path, reportDirectory, cancellation) { Owner = this };
+            window.Show();
+        }, DispatcherPriority.Normal, cancellation);
+        await window!.ClosedTask.ConfigureAwait(false);
+        return window.ResourceReleaseConfirmed;
     }
     private async Task<T> BeginOnUiAsync<T>(Func<T> begin, CancellationToken cancellation)
     {

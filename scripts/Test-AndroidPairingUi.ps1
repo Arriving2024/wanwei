@@ -1,6 +1,6 @@
-param([switch]$ConfirmPairing, [switch]$PrepareOnly, [switch]$PreferPhoneGroupOwner)
+param([switch]$ConfirmPairing, [switch]$PrepareOnly, [switch]$SelectOnly, [switch]$ConnectSelected, [switch]$PreferPhoneGroupOwner, [switch]$FileTransferLab)
 $ErrorActionPreference = 'Stop'
-if ($ConfirmPairing -eq $PrepareOnly) { throw 'Choose -PrepareOnly or -ConfirmPairing, not both.' }
+if ((@($ConfirmPairing,$PrepareOnly,$SelectOnly,$ConnectSelected) | Where-Object {$_}).Count -ne 1) { throw 'Choose exactly one preparation, selection or connection mode.' }
 $wanweiRoot = Split-Path -Parent $PSScriptRoot
 $wanweiAdb = Join-Path $wanweiRoot '.tools\android-sdk\platform-tools\adb.exe'
 $wanweiPackage = 'dev.wanwei.androidlab'
@@ -65,6 +65,15 @@ function Find-WanweiControl([string]$Id) {
     }
     throw 'Requested Wanwei control is not visible.'
 }
+function Move-WanweiToTop {
+    $xml = Read-WanweiUi
+    $content = $xml.SelectSingleNode("//node[@package='$wanweiPackage' and @resource-id='android:id/content']")
+    if ($null -eq $content -or $content.bounds -notmatch '^\[0,0\]\[(\d+),(\d+)\]$') { throw 'App viewport unavailable.' }
+    $x = [int]([int]$Matches[1] * .5); $height = [int]$Matches[2]
+    for ($i = 0; $i -lt 6; $i++) {
+        $null = Invoke-WanweiUiAdb @('shell','input','swipe',"$x",([string][int]($height*.25)),"$x",([string][int]($height*.85)),'250')
+    }
+}
 
 # Position the visible scan control before starting the Windows discovery timer.
 # Never try to operate the application through the phone lock screen.
@@ -72,6 +81,8 @@ $lockState = Invoke-WanweiUiAdb @('shell','dumpsys','window','policy')
 if ($lockState -notmatch '(?m)^\s+showing=false\s*$') {
     throw 'Phone unlock is not confirmed. Unlock it yourself and keep Wanwei in front.'
 }
+if (-not $SelectOnly) {
+if (-not $ConnectSelected) { Move-WanweiToTop }
 $roleControl = Find-WanweiControl 'dev.wanwei.androidlab:id/pair_prefer_phone_go'
 $expectedRoleChecked = if ($PreferPhoneGroupOwner) { 'true' } else { 'false' }
 if ($roleControl.checkable -ne 'true' -or $roleControl.enabled -ne 'true') { throw 'Role preference control is not ready.' }
@@ -81,6 +92,27 @@ if ($roleControl.checked -ne $expectedRoleChecked) {
     $roleControl = Find-WanweiControl 'dev.wanwei.androidlab:id/pair_prefer_phone_go'
     if ($roleControl.checked -ne $expectedRoleChecked) { throw 'Role preference was not confirmed.' }
 }
+$transferControls = (Read-WanweiUi).SelectNodes("//node[@package='$wanweiPackage' and @resource-id='dev.wanwei.androidlab:id/pair_file_experiment']")
+if ($FileTransferLab -or $transferControls.Count -gt 0) {
+    $transferControl = Find-WanweiControl 'dev.wanwei.androidlab:id/pair_file_experiment'
+    $expectedTransferChecked = if ($FileTransferLab) { 'true' } else { 'false' }
+    if ($transferControl.checkable -ne 'true' -or $transferControl.enabled -ne 'true') { throw 'File experiment control is not ready.' }
+    if ($transferControl.checked -ne $expectedTransferChecked) {
+        if (-not $PrepareOnly) { throw 'Prepare the requested file experiment before starting the Windows timer.' }
+        Tap-WanweiNode $transferControl
+        $transferControl = Find-WanweiControl 'dev.wanwei.androidlab:id/pair_file_experiment'
+        if ($transferControl.checked -ne $expectedTransferChecked) { throw 'File experiment was not confirmed.' }
+    }
+}
+}
+if ($ConnectSelected) {
+    Tap-WanweiNode (Find-WanweiControl 'dev.wanwei.androidlab:id/pair_connect')
+    $xml = Read-WanweiUi
+    Tap-WanweiNode ($xml.SelectSingleNode("//node[@package='$wanweiPackage' and @resource-id='android:id/button1' and @text='确认连接']"))
+    Write-Output 'The already selected candidate was confirmed. Check the Windows prompt.'
+    return
+}
+if (-not $SelectOnly) { Move-WanweiToTop }
 $scanControl = Find-WanweiControl 'dev.wanwei.androidlab:id/scan_nearby'
 if ($PrepareOnly) {
     if ($scanControl.enabled -ne 'true') { throw 'The scan control is visible but busy.' }
@@ -102,6 +134,11 @@ $xml = Read-WanweiUi
 $candidates = $xml.SelectNodes("//node[@package='$wanweiPackage' and @resource-id='android:id/text1']")
 if ($candidates.Count -ne 1 -or $candidates[0].text -notmatch '^候选 1 · [0-9a-f]{12}') { throw 'Expected exactly one anonymous candidate; manual selection required.' }
 Tap-WanweiNode $candidates[0]
+if ($SelectOnly) {
+    $null = Find-WanweiControl 'dev.wanwei.androidlab:id/pair_connect'
+    Write-Output 'A single candidate is selected; no connection request has been sent.'
+    return
+}
 Tap-WanweiNode (Find-WanweiControl 'dev.wanwei.androidlab:id/pair_connect')
 $xml = Read-WanweiUi
 $confirm = $xml.SelectSingleNode("//node[@package='$wanweiPackage' and @resource-id='android:id/button1' and @text='确认连接']")
