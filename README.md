@@ -16,13 +16,13 @@
 
 ## 使用与构建
 
-首个连接实验版下载：[GitHub 预发布页](https://github.com/Arriving2024/wanwei/releases/tag/lab-2026.10.14)。该页的 Windows 0.2.2、Android 0.2.5 为此前建连版本，包含便携 ZIP、Debug APK 和校验文件；不包含 0.3.0 新增文件实验或 Apple 安装包。请以各版本实际资产和检查结果为准。
+当前实验版下载：[0.3.0 预发布页](https://github.com/Arriving2024/wanwei/releases/tag/p0-0.3.0)，包含 Windows 便携 ZIP、Android Debug APK 和 SHA-256 校验文件。三项资产的远端摘要与本地包一致，并已验证匿名下载校验文件。固定 1 MiB 文件实验仍待真机双向验收；没有 Apple 签名安装包。此前的 [连接实验版](https://github.com/Arriving2024/wanwei/releases/tag/lab-2026.10.14) 保留 Windows 0.2.2 和 Android 0.2.5，未包含文件实验。
 
 - Windows：便携实验包完整解压后运行 `Wanwei.Windows.exe`；自行构建可运行根目录 `Start-Windows.cmd`。见 [构建说明](docs/building.md) 和 [便携包说明](docs/windows-portable-package.md)。
 - Android：使用 Android Studio 或 Gradle wrapper 构建 Debug APK，安装后名为“万维实验室”；[构建说明](docs/building.md) 列出 SDK 与权限要求。
 - iPhone / iPad：可在 Windows 编辑源码，在兼容的 Mac + Xcode 上编译、签名和真机调试。开发者模式不能代替 Mac 构建环境，见 [Apple 上机步骤](docs/apple-p0-quickstart.md)。
 
-Windows、Android 与 Apple 不签名编译的首轮完整 [云端检查](https://github.com/Arriving2024/wanwei/actions/runs/38498065696) 已通过。自动检查只验证构建和逻辑，不操作无线设备，不替代设备现场的确认、连接和保网验收。
+0.3.0 的 Windows、Android 与 Apple 未签名编译 [云端检查](https://github.com/Arriving2024/wanwei/actions/runs/38571714932) 均已通过。自动检查只验证构建和逻辑，不操作无线设备，不替代设备现场的确认、连接和保网验收。
 
 0.3.0 文件实验需先核对双方完整 64 位 SPKI SHA-256 指纹，监听端只绑定当前原生 P2P 接口，发送端也绑定本机实际 P2P 地址。端口与指纹目前通过线下实验参数交换。为排除远程操作工具的确认延迟，调试版另有显式启用的 USB 辅助固定数据实验；USB 只传控制参数，文件内容仍必须走已验证的无线 Direct socket。此实验使用受限预授权，并在报告中与人工点击接收区分。见 [文件实验步骤与边界](docs/p0-file-transfer.md)。
 
