@@ -1,6 +1,6 @@
 # 万维 Apple 能力探测器
 
-状态：原创 SwiftUI 工程已准备；Windows 静态配置核验已完成；**Mac 编译、签名、安装和真机能力均未验证**。这里没有已构建的 IPA。
+状态：原创 SwiftUI 工程已准备；Windows 静态配置核验及 2026-10-14 的 [GitHub Mac 不签名编译](https://github.com/Arriving2024/wanwei/actions/runs/38497404842/job/115636217538) 通过。**签名、安装和真机能力均未验证**。这里没有可安装的 IPA。
 
 入口：`WanweiAppleLab.xcodeproj`，共享 Scheme：`WanweiAppleLab`。目标为 iPhone/iPad，iOS/iPadOS 26 起，不包含 Mac Catalyst。
 

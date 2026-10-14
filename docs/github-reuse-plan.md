@@ -60,7 +60,7 @@ LocalSend 主仓库 v1.18.2 有 [Apache-2.0 许可证](https://github.com/locals
 
 ## iOS/iPadOS 与投屏仍有哪些缺口
 
-LocalSend 可以在 Apple 平台进行局域网传输，不会因此替万维建立跨系统无线直连。Apple 端仍须依照 [Wi-Fi Aware 官方文档](https://developer.apple.com/documentation/wifiaware/building-peer-to-peer-apps) 验证设备、系统、授权、服务和对端接口；不能把 Aware、Android/Windows Direct 与苹果 AirDrop 当作可直接互换的协议。当前 Apple 工程尚需 Mac 编译签名与真机验证。
+LocalSend 可以在 Apple 平台进行局域网传输，不会因此替万维建立跨系统无线直连。Apple 端仍须依照 [Wi-Fi Aware 官方文档](https://developer.apple.com/documentation/wifiaware/building-peer-to-peer-apps) 验证设备、系统、授权、服务和对端接口；不能把 Aware、Android/Windows Direct 与苹果 AirDrop 当作可直接互换的协议。当前 Apple 工程已通过 GitHub Mac 不签名编译；签名安装与真机验证仍待完成。
 
 scrcpy 可帮助理解 Android 媒体链路，但不解决 Apple 捕获或无需调试模式的授权。面向普通应用的 Android 屏幕捕获需使用 [MediaProjection](https://developer.android.com/media/grow/media-projection) 的系统授权；Apple 端另按平台接口实现。屏幕编码通常涉及压缩，不能因文件传输无损就宣传无损投屏；端到端延迟、画质、音画同步及 Wi-Fi 拥塞需要独立验收。
 

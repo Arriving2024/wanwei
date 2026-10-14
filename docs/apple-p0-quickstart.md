@@ -2,7 +2,7 @@
 
 更新：2026-10-14。
 
-Apple 端的第一步已准备成可以交给 Mac 的原生 SwiftUI 工程。当前完成的是源码和 Windows 上的静态核验；**没有在 Xcode 编译，没有签名安装，也没有 iPhone/iPad 直连结果**。
+Apple 端的第一步是原生 SwiftUI 能力探测工程。Windows 静态核验已完成；2026-10-14 已在 [GitHub Mac 环境](https://github.com/Arriving2024/wanwei/actions/runs/38497404842/job/115636217538) 使用 Xcode 做不签名编译并通过。**尚未签名安装，没有 iPhone/iPad 真机或直连结果**。云端构建不接触本地 iPad。
 
 仓库中的工程位置：`apps/apple/WanweiAppleLab.xcodeproj`。完整源码在同级 `WanweiAppleLab` 文件夹。不要只复制 `.xcodeproj`，请把整个 `apps/apple` 文件夹带到 Mac。
 
