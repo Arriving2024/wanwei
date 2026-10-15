@@ -1,6 +1,6 @@
 # 万维 Apple 能力与配对准备工程
 
-状态：Apple 0.1.1 源码加入了用户主动操作的系统配对准备页，等待本次 Xcode 不签名编译；历史能力探测器的 [GitHub Mac 不签名编译](https://github.com/Arriving2024/wanwei/actions/runs/38497404842/job/115636217538) 已通过，不能替代本次改动的编译结果。**签名、安装、系统配对和真机能力均未验证**。这里没有可安装的 IPA。
+状态：Apple 0.1.1 源码加入了用户主动操作的系统配对准备页，已通过本次 [GitHub Mac 不签名编译](https://github.com/Arriving2024/wanwei/actions/runs/38702523633)。**签名、安装、系统配对和真机能力均未验证**。这里没有可安装的 IPA。
 
 入口：`WanweiAppleLab.xcodeproj`，共享 Scheme：`WanweiAppleLab`。目标为 iPhone/iPad，iOS/iPadOS 26 起，不包含 Mac Catalyst。
 

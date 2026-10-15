@@ -2,7 +2,7 @@
 
 更新：2026-10-15。
 
-Apple 0.1.1 源码保留单机能力检查，新增由用户主动操作的系统配对准备页。此前能力探测器已在 [GitHub Mac 环境](https://github.com/Arriving2024/wanwei/actions/runs/38497404842/job/115636217538) 使用 Xcode 不签名编译通过；**本次新增配对页仍待 Xcode 编译，尚未签名安装，没有 iPhone/iPad 真机或直连结果**。当前暂时借不到 Mac，可以继续整理源码并做云端不签名编译，不能把这两件事当作真机验收。云端构建不接触本地 iPad。
+Apple 0.1.1 源码保留单机能力检查，新增由用户主动操作的系统配对准备页。本次新增页面已在 [GitHub Mac 环境](https://github.com/Arriving2024/wanwei/actions/runs/38702523633) 使用 Xcode 不签名编译通过；**尚未签名安装，没有 iPhone/iPad 真机或直连结果**。当前暂时借不到 Mac，先保留已编译工程，不能把云端编译当作真机验收。云端构建不接触本地 iPad。
 
 仓库中的工程位置：`apps/apple/WanweiAppleLab.xcodeproj`。完整源码在同级 `WanweiAppleLab` 文件夹。不要只复制 `.xcodeproj`，请把整个 `apps/apple` 文件夹带到 Mac。
 
@@ -86,7 +86,7 @@ codesign -d --entitlements :- "/实际构建路径/WanweiAppleLab.app"
 
 ## 接下来的验收门槛
 
-本次准备页在 Mac CI 编译通过后，仍要按上述步骤完成签名安装、单机与双机系统配对。之后才实现选定对端的数据连接、应用公钥身份与 TLS、固定测试文件、落盘及哈希核验；不能把系统 Wi-Fi 层加密当作既有 P0 应用身份校验。文件传输采用官方建议的 bulk 模式起步，双方性能模式一致，低延迟和投屏以后另验。最后把双方连到各自原有 Wi-Fi，独立检查传输期间原 AP 与互联网是否持续可用。[连接接口与配对要求](https://developer.apple.com/documentation/wifiaware/connecting-paired-devices)
+本次准备页已通过 Mac CI 编译，仍要按上述步骤完成签名安装、单机与双机系统配对。之后才实现选定对端的数据连接、应用公钥身份与 TLS、固定测试文件、落盘及哈希核验；不能把系统 Wi-Fi 层加密当作既有 P0 应用身份校验。文件传输采用官方建议的 bulk 模式起步，双方性能模式一致，低延迟和投屏以后另验。最后把双方连到各自原有 Wi-Fi，独立检查传输期间原 AP 与互联网是否持续可用。[连接接口与配对要求](https://developer.apple.com/documentation/wifiaware/connecting-paired-devices)
 
 Apple ↔ 荣耀和 Apple ↔ Windows 仍是独立互通任务。当前荣耀未提供 Aware 服务，不能因为 Apple 端查询成功就宣称已解决跨平台底层互通。
 
