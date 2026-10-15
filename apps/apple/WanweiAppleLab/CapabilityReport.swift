@@ -36,6 +36,7 @@ struct CapabilityReport: Codable {
         var status: String
         var notes = [
             "本报告仅记录本机能力与应用配置。",
+            "配对准备页另有独立报告；本机能力报告不记录整个应用的配对历史。",
             "源码 entitlement 不等于签名中已获授权；需在 Mac 核验已签名应用。",
             "未启动广播、扫描、配对、连接或文件传输。",
             "未读取 SSID、BSSID、MAC、设备序列号、个人设备名或已配对设备。"
@@ -84,7 +85,7 @@ struct CapabilityReport: Codable {
             publishableServiceVisible: publishable,
             subscribableServiceVisible: subscribable,
             signingAuthorization: "not_verified_by_app",
-            pairingAuthorization: "not_requested",
+            pairingAuthorization: "not_requested_by_capability_probe",
             connectionTest: "not_tested",
             originalWiFiContinuity: "not_tested",
             applicationPayloadSent: false,

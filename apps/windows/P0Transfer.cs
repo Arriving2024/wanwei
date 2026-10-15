@@ -36,7 +36,7 @@ internal sealed record P0Path(IPAddress Local, IPAddress Remote, string Interfac
 internal sealed class P0TransferStatus
 {
     public string Schema { get; } = "wanwei.p0.transfer/1";
-    public string AppVersion { get; } = "0.3.1";
+    public string AppVersion { get; } = "0.3.2";
     public string RunId { get; } = Guid.NewGuid().ToString("N");
     public DateTimeOffset StartedUtc { get; } = DateTimeOffset.UtcNow;
     public string Role { get; set; } = "not_started";
@@ -67,6 +67,8 @@ internal sealed class P0TransferStatus
     public bool SocketClosed { get; set; }
     public bool TemporaryFileCleanupConfirmed { get; set; }
     public bool CleanupFinished { get; set; }
+    public string PortExchange { get; set; } = "manual_out_of_band";
+    public bool? RendezvousControlClosed { get; set; }
     public bool SessionResumptionAllowed { get; } = false;
     public string EndpointSource { get; set; } = "native_WiFiDirectDevice_and_actual_bound_socket";
     public string InternetContinuity { get; } = "not_tested";
@@ -75,11 +77,12 @@ internal sealed class P0TransferStatus
 internal sealed class P0Transfer(P0Identity identity, string reportDirectory, Action<P0TransferStatus> update)
 {
     internal async Task RunAsync(bool receiver, P0Path path, string peerPin, int remotePort,
-        Func<string, CancellationToken, Task<bool>> acceptOffer, CancellationToken cancellation, bool operatorFixturePreauthorized = false)
+        Func<string, CancellationToken, Task<bool>> acceptOffer, CancellationToken cancellation, bool operatorFixturePreauthorized = false,
+        Func<int, CancellationToken, P0RendezvousResponder>? listenerReady = null, string portExchange = "manual_out_of_band")
     {
         var status = new P0TransferStatus { Role = receiver ? "receiver" : "sender", LocalIdentity = identity.Fingerprint,
             TrustedPeerIdentity = peerPin, PeerTrustExplicitlyConfirmed = true, NativeLocalAddress = path.Local.ToString(),
-            NativeRemoteAddress = path.Remote.ToString(), InterfaceId = path.InterfaceId };
+            NativeRemoteAddress = path.Remote.ToString(), InterfaceId = path.InterfaceId, PortExchange = portExchange };
         status.OperatorFixturePreauthorized = operatorFixturePreauthorized;
         status.PreauthorizationSource = operatorFixturePreauthorized ? "explicit_cli_local_USB_bootstrap_fixed_1MiB_fixture" : "none";
         if (path.LoopbackHostTest) status.EndpointSource = "host_test_loopback_no_radio_no_Direct_claim";
@@ -96,6 +99,7 @@ internal sealed class P0Transfer(P0Identity identity, string reportDirectory, Ac
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         using Socket listener = new(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
         Socket? socket = null; SslStream? tls = null; P0Wire? wire = null;
+        P0RendezvousResponder? rendezvous = null;
         P0Storage? storage = null;
         Task? pendingWrite = null;
         Task<P0Message>? pendingRead = null;
@@ -110,8 +114,29 @@ internal sealed class P0Transfer(P0Identity identity, string reportDirectory, Ac
             {
                 listener.ExclusiveAddressUse = true; listener.Bind(new IPEndPoint(path.Local, 0)); listener.Listen(1);
                 var local = (IPEndPoint)listener.LocalEndPoint!; status.SocketLocalAddress = local.Address.ToString(); status.SocketLocalPort = local.Port;
+                if (listenerReady is not null)
+                {
+                    // Synchronous binding happens before reporting readiness. A failed
+                    // control bind stops this receiver; it never falls back to a LAN.
+                    rendezvous = listenerReady(local.Port, establishment.Token);
+                    status.RendezvousControlClosed = false;
+                }
                 Publish("listening");
-                socket = await listener.AcceptAsync(establishment.Token).ConfigureAwait(false);
+                using var acceptDeadline = rendezvous is null ? null : CancellationTokenSource.CreateLinkedTokenSource(establishment.Token, rendezvous.Stopped);
+                try { socket = await listener.AcceptAsync(acceptDeadline?.Token ?? establishment.Token).ConfigureAwait(false); }
+                catch (OperationCanceledException) when (!establishment.IsCancellationRequested && rendezvous?.FailureCode is not null)
+                { throw new P0Exception(rendezvous.FailureCode); }
+                finally
+                {
+                    if (rendezvous is not null)
+                    {
+                        // Stop advertising as soon as Accept completes, before TLS or
+                        // the OFFER prompt. UDP never accepts an application file.
+                        try { await rendezvous.DisposeAsync().ConfigureAwait(false); status.RendezvousControlClosed = rendezvous.ResourceReleaseConfirmed; }
+                        catch { status.RendezvousControlClosed = false; }
+                    }
+                }
+                if (status.RendezvousControlClosed == false) throw new P0Exception("RENDEZVOUS_CLEANUP_UNCONFIRMED");
                 listener.Close();
             }
             else
@@ -278,9 +303,15 @@ internal sealed class P0Transfer(P0Identity identity, string reportDirectory, Ac
         }
         finally
         {
+            if (rendezvous is not null)
+            {
+                try { await rendezvous.DisposeAsync().ConfigureAwait(false); status.RendezvousControlClosed = rendezvous.ResourceReleaseConfirmed; }
+                catch { status.RendezvousControlClosed = false; }
+                if (status.RendezvousControlClosed == false) status.ErrorCode ??= "RENDEZVOUS_CLEANUP_UNCONFIRMED";
+            }
             try { storage?.Dispose(); status.TemporaryFileCleanupConfirmed = storage?.CleanupConfirmed ?? true; }
             catch { status.TemporaryFileCleanupConfirmed = false; status.ErrorCode ??= "STORAGE_CLEANUP_UNCONFIRMED"; }
-            bool socketsClosed = true;
+            bool socketsClosed = status.RendezvousControlClosed != false;
             try { tls?.Dispose(); } catch { socketsClosed = false; }
             try { socket?.Dispose(); } catch { socketsClosed = false; }
             try { listener.Dispose(); } catch { socketsClosed = false; }

@@ -42,11 +42,14 @@ internal class P0TransferSession(context: Context, private val identity: P0Ident
     private val cancelled = AtomicReference<String?>(null)
     private val socket = AtomicReference<Socket?>(null)
     private val listener = AtomicReference<ServerSocket?>(null)
+    private val rendezvous = AtomicReference<P0Rendezvous.Responder?>(null)
+    @Volatile private var cleanupLocked = false
     private enum class OfferConsent { USER_ACCEPTED, USER_DECLINED, OPERATOR_PREAUTHORIZED }
     private val offerDecision = AtomicReference<CompletableFuture<OfferConsent>?>(null)
     @Volatile private var phaseDeadline = 0L
     @Volatile private var absoluteDeadline = 0L
     val busy: Boolean get() = active.get()
+    val retryLocked: Boolean get() = cleanupLocked
     fun acceptOffer(accept: Boolean) { offerDecision.get()?.complete(if (accept) OfferConsent.USER_ACCEPTED else OfferConsent.USER_DECLINED) }
     fun acceptFixedFixtureByOperator(): Boolean = offerDecision.get()?.complete(OfferConsent.OPERATOR_PREAUTHORIZED) ?: false
     fun cancel(reason: String = "CANCELLED") {
@@ -54,17 +57,20 @@ internal class P0TransferSession(context: Context, private val identity: P0Ident
         cancelled.compareAndSet(null, reason)
         offerDecision.get()?.complete(OfferConsent.USER_DECLINED)
         runCatching { socket.get()?.close() }; runCatching { listener.get()?.close() }
+        rendezvous.getAndSet(null)?.let { if (!it.closeAndConfirm()) cleanupLocked = true }
     }
-    fun startReceiver(peerPin: String, operatorPreauthorized: Boolean = false) = start("receiver", peerPin, null, null, operatorPreauthorized)
-    fun startSender(peerPin: String, peerAddress: String, port: Int, operatorPreauthorized: Boolean = false) = start("sender", peerPin, peerAddress, port, operatorPreauthorized)
+    fun startReceiver(peerPin: String, operatorPreauthorized: Boolean = false, automaticPortExchange: Boolean = false) = start("receiver", peerPin, null, null, operatorPreauthorized, automaticPortExchange)
+    fun startSender(peerPin: String, peerAddress: String, port: Int, operatorPreauthorized: Boolean = false) = start("sender", peerPin, peerAddress, port, operatorPreauthorized, false)
+    fun startSenderAutomatically(peerPin: String) = start("sender", peerPin, null, null, false, true)
 
-    private fun start(role: String, peerPin: String, peerAddress: String?, port: Int?, operatorPreauthorized: Boolean) {
+    private fun start(role: String, peerPin: String, peerAddress: String?, port: Int?, operatorPreauthorized: Boolean, automaticPortExchange: Boolean) {
+        if (cleanupLocked) return
         if (!active.compareAndSet(false, true)) return
         cancelled.set(null)
         val initialPath = pathProvider()
         val executor = Executors.newSingleThreadExecutor()
         executor.execute {
-            val report = JSONObject().put("schema", "wanwei-android-transfer/0.1").put("appVersion", "0.3.1")
+            val report = JSONObject().put("schema", "wanwei-android-transfer/0.1").put("appVersion", "0.3.2")
                 .put("id", UUID.randomUUID().toString()).put("role", role).put("startedAtUtc", Instant.now().toString())
                 .put("fixture", P0Protocol.FIXTURE).put("expectedSizeBytes", P0Protocol.SIZE).put("expectedSha256", P0Protocol.HASH)
                 .put("localIdentity", localPin).put("confirmedPeerIdentity", peerPin)
@@ -75,6 +81,8 @@ internal class P0TransferSession(context: Context, private val identity: P0Ident
                 .put("operatorFixturePreauthorized", operatorPreauthorized).put("userAcceptedOffer", false)
                 .put("preauthorizationSource", if (operatorPreauthorized) "debug_private_file_usb_lab" else JSONObject.NULL)
                 .put("sessionResumptionPolicy", "fresh_SSLContext_once_session_tickets_disabled_no_early_application_data")
+            var hintResponder: P0Rendezvous.Responder? = null
+            var hintClosed = true
             var partial: String? = null
             var fileDescriptor: FileDescriptor? = null
             var partialIdentity: P0OwnedCommit.Identity? = null
@@ -138,9 +146,11 @@ internal class P0TransferSession(context: Context, private val identity: P0Ident
                 if (!P0Protocol.fingerprint.matches(peerPin)) P0Protocol.fail("IDENTITY_MISMATCH")
                 ensureCurrent(initialPath)
                 val path = initialPath ?: P0Protocol.fail("DIRECT_PATH_UNVERIFIED")
+                if (automaticPortExchange && path.localIsOwner) P0Protocol.fail("AUTOMATIC_ROLE_UNSUPPORTED")
                 report.put("directEvidenceId", path.evidenceId).put("interfaceName", path.interfaceName)
                     .put("nativeLocalAddress", path.localAddress).put("nativeGroupOwnerAddress", path.groupOwnerAddress)
-                    .put("directPathVerified", true).put("portExchange", "manual_out_of_band_lab_parameters")
+                    .put("directPathVerified", true).put("portExchange", if (automaticPortExchange) "native_unicast_udp_hint_then_pinned_tls13" else "manual_out_of_band_lab_parameters")
+                    .put("portHintEstablishesIdentity", false)
                 val local = ipv4(path.localAddress)
                 val raw: Socket
                 if (role == "receiver") {
@@ -150,16 +160,30 @@ internal class P0TransferSession(context: Context, private val identity: P0Ident
                     server.bind(InetSocketAddress(local, 0), 1)
                     server.soTimeout = 30_000
                     report.put("listenerAddress", local.hostAddress).put("listenerPort", server.localPort)
-                    publish("listening", "等待发送端：${local.hostAddress}:${server.localPort}。端口需通过线下实验参数交给对端。", server.localPort)
-                    raw = server.accept(); socket.set(raw); server.close(); listener.set(null)
+                    if (automaticPortExchange) {
+                        hintResponder = P0Rendezvous.respond(local, ipv4(path.groupOwnerAddress), localPin, peerPin, server.localPort) { ensureCurrent(initialPath) }
+                        rendezvous.set(hintResponder)
+                        hintClosed = false
+                    }
+                    publish("listening", if (automaticPortExchange) "已准备接收，请在电脑点击发送；本次端口自动交换，收到请求后仍需确认。" else "等待发送端：${local.hostAddress}:${server.localPort}。端口需通过线下实验参数交给对端。", server.localPort)
+                    raw = server.accept(); socket.set(raw)
+                    hintResponder?.let { hintClosed = it.closeAndConfirm(); rendezvous.compareAndSet(it, null) }
+                    if (!hintClosed) P0Protocol.fail("PORT_EXCHANGE_CLEANUP_UNCONFIRMED")
+                    server.close(); listener.set(null)
                     if (!peerWithinDirectSubnet(path, raw.inetAddress)) P0Protocol.fail("DIRECT_PATH_UNVERIFIED")
                 } else {
-                    if (port == null || port !in 1..65535) P0Protocol.fail("INVALID_MESSAGE")
-                    val remote = ipv4(peerAddress ?: P0Protocol.fail("DIRECT_PATH_UNVERIFIED"))
+                    val remote = ipv4(if (automaticPortExchange) path.groupOwnerAddress else peerAddress ?: P0Protocol.fail("DIRECT_PATH_UNVERIFIED"))
                     if (!peerWithinDirectSubnet(path, remote)) P0Protocol.fail("DIRECT_PATH_UNVERIFIED")
+                    val selectedPort = if (automaticPortExchange) {
+                        publish("resolving_receiver", "正在直连链路上寻找对方的接收端口，请先让电脑等待接收。")
+                        val hint = P0Rendezvous.resolve(local, remote, localPin, peerPin) { ensureCurrent(initialPath) }
+                        report.put("portHintQueriesSent", hint.queriesSent)
+                        hint.port
+                    } else port ?: P0Protocol.fail("INVALID_MESSAGE")
+                    if (selectedPort !in 1..65535) P0Protocol.fail("INVALID_MESSAGE")
                     raw = Socket(); socket.set(raw)
                     raw.bind(InetSocketAddress(local, 0))
-                    raw.connect(InetSocketAddress(remote, port), (phaseDeadline - now()).coerceAtLeast(1).toInt())
+                    raw.connect(InetSocketAddress(remote, selectedPort), (phaseDeadline - now()).coerceAtLeast(1).toInt())
                 }
                 if (raw.localAddress != local) P0Protocol.fail("DIRECT_PATH_UNVERIFIED")
                 report.put("socketLocalAddress", raw.localAddress.hostAddress).put("socketLocalPort", raw.localPort)
@@ -381,6 +405,13 @@ internal class P0TransferSession(context: Context, private val identity: P0Ident
                 publish("failed", if (committed) "本机文件已提交，但对方是否收到保存确认未知。" else "本次传输结束：$code。")
             } finally {
                 watchdog.shutdownNow()
+                hintResponder?.let {
+                    hintClosed = it.closeAndConfirm()
+                    rendezvous.compareAndSet(it, null)
+                    report.put("portHintResponsesSent", it.responsesSent)
+                }
+                if (!hintClosed) cleanupLocked = true
+                report.put("portHintSocketCleanupConfirmed", hintClosed)
                 offerDecision.getAndSet(null)?.complete(OfferConsent.USER_DECLINED)
                 if (!committed) {
                     val ownedDirectoryStillPresent = runCatching {
@@ -408,7 +439,7 @@ internal class P0TransferSession(context: Context, private val identity: P0Ident
                 runCatching { auxiliaryReader?.join(500) }
                 runCatching { watchdog.awaitTermination(500, TimeUnit.MILLISECONDS) }
                 report.put("finishedAtUtc", Instant.now().toString())
-                    .put("socketResourcesClosed", (previousSocket == null || previousSocket.isClosed) && (previousListener == null || previousListener.isClosed))
+                    .put("socketResourcesClosed", hintClosed && (previousSocket == null || previousSocket.isClosed) && (previousListener == null || previousListener.isClosed))
                     .put("elapsedMs", now() - started).put("state", "finished")
                 try { persist(report) } finally {
                     active.set(false)

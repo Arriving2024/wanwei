@@ -57,6 +57,12 @@ struct ContentView: View {
                         row("文件传输", "尚未实现")
                     }
                     Section {
+                        NavigationLink("系统配对准备 · 不传文件") { PairingPreparationView() }
+                            .accessibilityIdentifier("open_pairing_preparation")
+                    } footer: {
+                        Text("该页只提供用户主动操作的系统配对入口。能力、签名、配对、数据连接和文件保存分别验收。")
+                    }
+                    Section {
                         Button("重新检查本机") { refresh() }
                             .accessibilityIdentifier("refresh_capability")
                         Button("导出 JSON 报告") { prepareExport(report) }

@@ -78,12 +78,16 @@ internal static class P0SelfTests
         TransferLoopbackAsync(check, installed, peer, false).GetAwaiter().GetResult();
         TransferLoopbackAsync(check, installed, peer, true).GetAwaiter().GetResult();
         TransferLoopbackAsync(check, installed, peer, false, true).GetAwaiter().GetResult();
+        TransferLoopbackAsync(check, installed, peer, false, rendezvous: true).GetAwaiter().GetResult();
+        TransferLoopbackAsync(check, installed, peer, true, rendezvous: true).GetAwaiter().GetResult();
+        RendezvousNegativeAsync(check, installed, peer).GetAwaiter().GetResult();
         DataBeforeAcceptAsync(check, installed, peer).GetAwaiter().GetResult();
         EarlyCompleteAsync(check, installed, peer).GetAwaiter().GetResult();
         FramingAsync(check).GetAwaiter().GetResult();
         var deadline = new PairingDeadlines(60, 180); deadline.Start(0); deadline.TrySelectRequest(1); deadline.TryObserveConnection(2);
         check("P0 opt-in observation has fixed 180 second boundary", deadline.ObservationBudgetMs == 180_000 && deadline.MaximumRunMs == 285_000 && !deadline.TryObserveConnection(3));
         UsbLabPolicy(check);
+        P0RendezvousSelfTests.Run(check);
     }
     private static void AssociationPolicy(Action<string, bool> check, X509Certificate2 certificate)
     {
@@ -226,7 +230,7 @@ internal static class P0SelfTests
             P0Storage.RejectReparse(resolved); Directory.Delete(resolved, true);
         }
     }
-    private static async Task TransferLoopbackAsync(Action<string, bool> check, P0Identity receiverIdentity, X509Certificate2 peerCertificate, bool decline, bool preauthorized = false)
+    private static async Task TransferLoopbackAsync(Action<string, bool> check, P0Identity receiverIdentity, X509Certificate2 peerCertificate, bool decline, bool preauthorized = false, bool rendezvous = false)
     {
         // Exercise the production TLS/framing/save state machine on loopback.
         // This factory is used only by --self-test; the GUI always requires
@@ -238,15 +242,24 @@ internal static class P0SelfTests
         P0Storage.EnsureSafeDirectory(folder);
         using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(8));
         var portReady = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var path = new P0Path(IPAddress.Loopback, IPAddress.Loopback, "loopback-host-test", () => true, true);
+        var path = new P0Path(rendezvous ? IPAddress.Parse("127.0.0.2") : IPAddress.Loopback, IPAddress.Loopback, "loopback-host-test", () => true, true);
+        var senderPath = rendezvous ? new P0Path(path.Remote, path.Local, "loopback-host-test", () => true, true) : path;
         P0TransferStatus? rx = null, tx = null;
+        int offerConfirmations = 0;
+        bool controlClosedBeforeOffer = false;
         try
         {
             var receiver = new P0Transfer(receiverIdentity, Path.Combine(folder, "rx"), status => { rx = status; if (status.State == "listening") portReady.TrySetResult(status.SocketLocalPort!.Value); });
-            Task receiving = receiver.RunAsync(true, path, peerIdentity.Fingerprint, 0, (_, _) => Task.FromResult(!decline), stop.Token, operatorFixturePreauthorized: preauthorized);
+            Task receiving = receiver.RunAsync(true, path, peerIdentity.Fingerprint, 0, (_, _) => {
+                offerConfirmations++; controlClosedBeforeOffer = rx?.RendezvousControlClosed == true; return Task.FromResult(!decline);
+            }, stop.Token, operatorFixturePreauthorized: preauthorized,
+                listenerReady: rendezvous ? (readyPort, token) => P0RendezvousResponder.Start(path, receiverIdentity.Fingerprint, peerIdentity.Fingerprint, readyPort, token) : null,
+                portExchange: rendezvous ? "native_udp_rendezvous_untrusted_hint" : "manual_out_of_band");
             int port = await portReady.Task.WaitAsync(stop.Token);
+            if (rendezvous) port = await P0Rendezvous.ResolveAsync(senderPath, peerIdentity.Fingerprint, receiverIdentity.Fingerprint, stop.Token);
             var sender = new P0Transfer(peerIdentity, Path.Combine(folder, "tx"), status => tx = status);
-            Task sending = sender.RunAsync(false, path, receiverIdentity.Fingerprint, port, (_, _) => throw new InvalidOperationException("Sender cannot approve receiving"), stop.Token);
+            Task sending = sender.RunAsync(false, senderPath, receiverIdentity.Fingerprint, port, (_, _) => throw new InvalidOperationException("Sender cannot approve receiving"), stop.Token,
+                portExchange: rendezvous ? "native_udp_rendezvous_untrusted_hint" : "manual_out_of_band");
             await Task.WhenAll(receiving, sending);
             if (decline)
             {
@@ -259,6 +272,13 @@ internal static class P0SelfTests
             }
             check("P0 loopback resources and partial file cleanup confirmed " + decline, rx is { SocketClosed: true, TemporaryFileCleanupConfirmed: true } && tx is { SocketClosed: true, TemporaryFileCleanupConfirmed: true });
             if (preauthorized) check("P0 USB fixture preauthorization never claims receiver button click", rx is { OperatorFixturePreauthorized: true, ReceiverUserAccepted: false } && rx.PreauthorizationSource == "explicit_cli_local_USB_bootstrap_fixed_1MiB_fixture");
+            if (rendezvous)
+            {
+                check("P0 automatic port hint still requires one authenticated OFFER decision " + decline, offerConfirmations == 1 && controlClosedBeforeOffer && rx is { OperatorFixturePreauthorized: false, RendezvousControlClosed: true });
+                check("P0 automatic port discovery retains pinned mutual TLS and actual reciprocal sockets " + decline,
+                    rx?.AuthenticatedPeerIdentity == peerIdentity.Fingerprint && tx?.AuthenticatedPeerIdentity == receiverIdentity.Fingerprint &&
+                    rx?.TlsProtocol == "Tls13" && tx?.TlsProtocol == "Tls13" && rx?.SocketLocalAddress == tx?.SocketRemoteAddress && rx?.SocketRemoteAddress == tx?.SocketLocalAddress && rx?.SocketLocalPort == tx?.SocketRemotePort);
+            }
         }
         finally
         {
@@ -266,6 +286,50 @@ internal static class P0SelfTests
             if (rx?.SavedLocalName is { } localName) File.Delete(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WanweiLab", "P0Received", localName));
             // Only this random test directory was created here; resolve and
             // verify the deletion target under the dedicated host-test root.
+            if (!folder.StartsWith(knownRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) throw new IOException("TEST_CLEANUP_PATH_REJECTED");
+            P0Storage.RejectReparse(folder); Directory.Delete(folder, true);
+        }
+    }
+    private static async Task RendezvousNegativeAsync(Action<string, bool> check, P0Identity receiverIdentity, X509Certificate2 peerCertificate)
+    {
+        using var peerIdentity = P0Identity.ForHostTest(new X509Certificate2(peerCertificate));
+        string knownRoot = Path.GetFullPath(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WanweiLab", "P0SelfTests"));
+        string folder = Path.GetFullPath(Path.Combine(knownRoot, Guid.NewGuid().ToString("N")));
+        P0Storage.EnsureSafeDirectory(folder);
+        var path = new P0Path(IPAddress.Parse("127.0.0.2"), IPAddress.Loopback, "loopback-control-test-no-native-claim", () => true, true);
+        var senderPath = new P0Path(path.Remote, path.Local, path.InterfaceId, () => true, true);
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        P0TransferStatus? rx = null, tx = null;
+        int offerDecisions = 0;
+        try
+        {
+            var ready = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+            string forgedPin = new('c', 64);
+            var receiver = new P0Transfer(receiverIdentity, Path.Combine(folder, "rx"), status => { rx = status; if (status.State == "listening") ready.TrySetResult(status.SocketLocalPort!.Value); });
+            Task receiving = receiver.RunAsync(true, path, peerIdentity.Fingerprint, 0, (_, _) => { offerDecisions++; return Task.FromResult(true); }, stop.Token,
+                listenerReady: (port, token) => P0RendezvousResponder.Start(path, forgedPin, peerIdentity.Fingerprint, port, token), portExchange: "native_udp_rendezvous_untrusted_hint");
+            _ = await ready.Task.WaitAsync(stop.Token);
+            // Model a forged but otherwise well-formed UDP hint. Its claimed
+            // identity deliberately differs from the actual server certificate.
+            int portHint = await P0Rendezvous.ResolveAsync(senderPath, peerIdentity.Fingerprint, forgedPin, stop.Token);
+            var sender = new P0Transfer(peerIdentity, Path.Combine(folder, "tx"), status => tx = status);
+            await Task.WhenAll(receiving, sender.RunAsync(false, senderPath, forgedPin, portHint, (_, _) => throw new InvalidOperationException("Sender cannot accept an OFFER"), stop.Token));
+            check("P0 forged UDP identity hint cannot replace full TLS certificate pin", tx is { State: "failed", ErrorCode: "TLS_AUTHENTICATION_FAILED", Bytes: 0, PeerSaveConfirmed: false, AuthenticatedPeerIdentity: null } && offerDecisions == 0 && rx is { Bytes: 0, ReceiverUserAccepted: false });
+            check("P0 failed TLS after automatic discovery closes all control and data sockets", rx is { RendezvousControlClosed: true, SocketClosed: true } && tx is { SocketClosed: true });
+            using var occupied = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp) { ExclusiveAddressUse = true };
+            occupied.Bind(new IPEndPoint(path.Local, P0Rendezvous.ControlPort));
+            bool readinessPublished = false;
+            receiver = new P0Transfer(receiverIdentity, Path.Combine(folder, "blocked"), status => { rx = status; readinessPublished |= status.State == "listening"; });
+            await receiver.RunAsync(true, path, peerIdentity.Fingerprint, 0, (_, _) => { offerDecisions++; return Task.FromResult(true); }, stop.Token,
+                listenerReady: (port, token) => P0RendezvousResponder.Start(path, receiverIdentity.Fingerprint, peerIdentity.Fingerprint, port, token));
+            check("P0 UDP bind failure stops TCP receiver before publishing readiness", !readinessPublished && rx is { State: "failed", ErrorCode: "RENDEZVOUS_UNAVAILABLE", Bytes: 0, SocketClosed: true, ReceiverUserAccepted: false } && offerDecisions == 0);
+            using var reboundTcp = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { ExclusiveAddressUse = true };
+            reboundTcp.Bind(new IPEndPoint(path.Local, rx!.SocketLocalPort!.Value));
+            check("P0 receiver bind failure releases its temporary TCP listening port", ((IPEndPoint)reboundTcp.LocalEndPoint!).Port == rx.SocketLocalPort);
+        }
+        finally
+        {
+            stop.Cancel();
             if (!folder.StartsWith(knownRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) throw new IOException("TEST_CLEANUP_PATH_REJECTED");
             P0Storage.RejectReparse(folder); Directory.Delete(folder, true);
         }

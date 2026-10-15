@@ -1,8 +1,8 @@
-# Apple P0：先在真机确认能力
+# Apple P0：能力检查与系统配对准备
 
-更新：2026-10-14。
+更新：2026-10-15。
 
-Apple 端的第一步是原生 SwiftUI 能力探测工程。Windows 静态核验已完成；2026-10-14 已在 [GitHub Mac 环境](https://github.com/Arriving2024/wanwei/actions/runs/38497404842/job/115636217538) 使用 Xcode 做不签名编译并通过。**尚未签名安装，没有 iPhone/iPad 真机或直连结果**。云端构建不接触本地 iPad。
+Apple 0.1.1 源码保留单机能力检查，新增由用户主动操作的系统配对准备页。此前能力探测器已在 [GitHub Mac 环境](https://github.com/Arriving2024/wanwei/actions/runs/38497404842/job/115636217538) 使用 Xcode 不签名编译通过；**本次新增配对页仍待 Xcode 编译，尚未签名安装，没有 iPhone/iPad 真机或直连结果**。当前暂时借不到 Mac，可以继续整理源码并做云端不签名编译，不能把这两件事当作真机验收。云端构建不接触本地 iPad。
 
 仓库中的工程位置：`apps/apple/WanweiAppleLab.xcodeproj`。完整源码在同级 `WanweiAppleLab` 文件夹。不要只复制 `.xcodeproj`，请把整个 `apps/apple` 文件夹带到 Mac。
 
@@ -23,9 +23,19 @@ Windows 可以编辑源码、协议和界面定义，也可以提交 GitHub 后�
 | iPhone/iPad 是否向应用报告 Aware 支持 | 查询 `WACapabilities` | 目标真机成功运行并导出报告 |
 | 应用服务配置是否正确 | 本地验证 Info.plist；支持时读取服务登记 | 页面配置有效，发布/订阅均已登记 |
 | 签名是否包含所需角色 | 页面明确显示待 Mac 核验 | 查看实际构建应用的签名 entitlement，并成功安装运行 |
-| 用户是否允许配对 | 本版未请求 | 后续加入系统配对界面后单独验证 |
+| 用户是否允许配对 | 用户主动进入准备页并点击系统控件；签名和真机行为待验 | 两台真机的系统界面及人工记录；列表计数或 endpoint 回调不能单独证明新配对成功 |
 | 是否直连、是否保留原 Wi-Fi | 本版未测试 | 后续双机连接与连续网络观测 |
-| 荣耀是否可以与 Apple Aware 互通 | 没有结论 | 荣耀先有可用的兼容底层能力；Apple 单机结果不能补齐它 |
+| Android / Windows 是否可以与 Apple Aware 互通 | 当前没有可用的兼容 Aware 传输实现 | 对端先有可用且兼容的底层能力；Apple 单机或 Apple 间配对不能补齐它 |
+
+## 先分清跨端路径
+
+Apple 的公开路径是 iOS/iPadOS 26 的 Wi-Fi Aware（NAN）。Apple 还提供另一种 Apple 点对点 Wi-Fi，但其无线机制没有向第三方公开，只能用于 Apple 设备之间；不能把它当作 Windows/Android 的公开 Wi-Fi Direct API。[Apple TN3111](https://developer.apple.com/documentation/technotes/tn3111-ios-wifi-api-overview)
+
+当前 Windows/Android 已验证的是 Wi-Fi Direct；Windows 使用 `WiFiDirectDevice`，不是 Aware 发布/订阅或配对。Microsoft 的公开 [Wi-Fi Direct API](https://learn.microsoft.com/en-us/uwp/api/windows.devices.wifidirect) 文档不提供把这条连接转换为 Apple Aware 的接口，本项目也没有 Windows Aware 实现。不能据此宣称 Windows 永远不能支持 Aware，但目前没有可直接复用的公开跨端路径。
+
+2026-10-15 的当前 Android 样机报告中，`frameworkApiPresent=true`、`hardwareFeatureReported=false`、`servicePresent=false`，`runtimeAvailable` 和 `pairingSupported` 都是未知。这里缺少系统向第三方应用开放的能力和服务，不是已经支持 Aware 后的暂时不可用。双 Wi-Fi/多网络支持不能替代它，也不能靠普通 APK 把系统没有开放的服务变出来。如果以后换到支持 Aware 的 Android 设备，还须核验 API 34 起的 `isAwarePairingSupported()` 及实际配对互通，不能只看 Android 版本。[Android 能力与可用性](https://developer.android.com/develop/connectivity/wifi/wifi-aware)、[配对能力](https://developer.android.com/reference/android/net/wifi/aware/Characteristics#isAwarePairingSupported())
+
+因此本阶段先准备 iPhone ↔ iPad 的 Apple 间系统配对。Apple ↔ 当前荣耀、Apple ↔ 当前 Windows 都仍是未打通的独立任务。加入普通热点不是保留现有 Wi-Fi 的替代验收方式。
 
 ## 借到 Mac 后的操作
 
@@ -58,11 +68,25 @@ codesign -d --entitlements :- "/实际构建路径/WanweiAppleLab.app"
 | `simulator_not_device_evidence` | 模拟器结果不作真机能力证据 |
 | `os_api_unavailable` / `sdk_framework_unavailable` | 系统 API 或构建 SDK 条件不满足；检查开发环境 |
 
-本版只检查一个声明为发布和订阅的 `_wanwei-lab._tcp` 服务。没有开始任何发布/订阅会话，也不打开系统配对界面。[配置规则](https://developer.apple.com/documentation/wifiaware/adopting-wi-fi-aware)
+首页能力探测器只检查一个声明为发布和订阅的 `_wanwei-lab._tcp` 服务，不启动无线发现或数据会话；能力报告的 `pairingAuthorization=not_requested_by_capability_probe` 只描述该探测器，不记录整个应用的配对历史。[配置规则](https://developer.apple.com/documentation/wifiaware/adopting-wi-fi-aware)
+
+## 两台 Apple 真机的配对准备验收
+
+以下步骤要等签名安装完成后再执行；当前没有真机结论。
+
+1. 两台设备各自完成首页能力检查与 JSON 导出。真机、系统支持和发布/订阅登记都通过时，才会在“系统配对准备”页提供系统控件；签名状态仍需前文的独立核验。
+2. 在 iPhone 和 iPad 上分别进入“系统配对准备”。一台选择“等待另一台设备”，另一台选择“寻找等待中的设备”。两端各点相应的系统按钮，选择本次目标设备；系统 PIN、信任及确认由设备持有人操作。若出现 fallback，记录无法使用，不能改走热点或把未发现判成对端一定不支持。
+3. 本版使用 `DevicePairingView` 与 `DevicePicker` 的 `.userSpecifiedDevices` 范围，只涉及用户在系统界面选择或配对的设备。该范围专用于系统配对控件，不用于数据 listener/browser。[官方配对示例](https://developer.apple.com/documentation/wifiaware/building-peer-to-peer-apps)、[发布范围](https://developer.apple.com/documentation/wifiaware/wapublisherlistener/devices/userspecifieddevices)、[订阅范围](https://developer.apple.com/documentation/wifiaware/wasubscriberbrowser/devices/userspecifieddevices)
+4. 分别导出“配对准备报告”。`systemPairingControlsConfigured` 只表示本机门槛通过并已配置控件；`systemUIFallbackObserved` 记录 fallback。`pairedDeviceCount` 是应用可访问的配对设备快照数量，可能来自此前配对。订阅端的 `subscriberEndpointReturnCount` 只记录系统实际返回 endpoint 的次数，不保留 endpoint，不推断它是新配对，更不等于数据连接成功。
+5. 人工记录两台目标设备的系统流程是否完成、是否首次 PIN 配对或选择既有设备、两个准备报告的时间是否对应，并交换角色再试。报告不输出设备名称/配对 ID，因此不能仅凭“数量大于零”证明配到了预期对端。取消、拒绝、系统入口不可用也应单独记录。
+
+配对列表观察使用 `WAPairedDevice.allDevices`，只保存计数和时间；离开页面或进入非活动状态即取消观察，不在后台保持任务。取消观察不会撤销系统已建立的配对。本版不创建 `NetworkListener`、`NetworkBrowser` 或 `NetworkConnection`，不保留或使用返回 endpoint，不发送应用 payload；`wifiAwareDataSessionStarted=false` 仅指本应用未创建数据会话，并不表示系统配对不使用无线电。
+
+`wanwei.apple.pairing-preparation.v1` 报告把 `newPairingSuccess` 固定为 `not_inferred_from_count_or_endpoint`，`connectionTest=not_implemented`、`originalWiFiContinuity=not_tested`、`applicationPayloadSent=false`。签名、系统配对、数据路径、应用身份认证、文件保存和原 Wi-Fi 连续性分别验收。
 
 ## 接下来的验收门槛
 
-两台 Apple 真机都完成能力检查后，再实现一次用户主动确认的系统配对，随后传输小测试文件并验证哈希。最后把双方连到各自原有 Wi-Fi，检查直连期间原网络和互联网是否持续可用。能力、配对、传输、并发联网分别记结果，不合并成一个“支持”。
+本次准备页在 Mac CI 编译通过后，仍要按上述步骤完成签名安装、单机与双机系统配对。之后才实现选定对端的数据连接、应用公钥身份与 TLS、固定测试文件、落盘及哈希核验；不能把系统 Wi-Fi 层加密当作既有 P0 应用身份校验。文件传输采用官方建议的 bulk 模式起步，双方性能模式一致，低延迟和投屏以后另验。最后把双方连到各自原有 Wi-Fi，独立检查传输期间原 AP 与互联网是否持续可用。[连接接口与配对要求](https://developer.apple.com/documentation/wifiaware/connecting-paired-devices)
 
 Apple ↔ 荣耀和 Apple ↔ Windows 仍是独立互通任务。当前荣耀未提供 Aware 服务，不能因为 Apple 端查询成功就宣称已解决跨平台底层互通。
 

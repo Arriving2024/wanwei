@@ -54,7 +54,7 @@ public sealed class MainWindow : Window, IPairingUi
         Content = root;
 
         var header = new DockPanel { Margin = new Thickness(0, 0, 0, 24) };
-        var tag = Text("WINDOWS  /  P0.3.1", 12, "#84B9FF");
+        var tag = Text("WINDOWS  /  P0.3.2", 12, "#84B9FF");
         tag.VerticalAlignment = VerticalAlignment.Center;
         DockPanel.SetDock(tag, Dock.Right); header.Children.Add(tag);
         header.Children.Add(Text("万维计划", 24, "#FFFFFF"));

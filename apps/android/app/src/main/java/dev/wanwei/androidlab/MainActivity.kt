@@ -25,6 +25,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
 import android.view.WindowInsets
+import android.view.View
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
@@ -84,6 +85,7 @@ class MainActivity : Activity() {
     private lateinit var peerPinInput: EditText
     private lateinit var remoteAddressInput: EditText
     private lateinit var peerPortInput: EditText
+    private lateinit var automaticPortCheckBox: CheckBox
     private lateinit var trustPeerButton: Button
     private lateinit var receiveTestButton: Button
     private lateinit var sendTestButton: Button
@@ -636,7 +638,7 @@ class MainActivity : Activity() {
     }
 
     private fun makeReport(kind: String): String = JSONObject()
-        .put("schema", "wanwei.android.p0.v1").put("appVersion", "0.3.1")
+        .put("schema", "wanwei.android.p0.v1").put("appVersion", "0.3.2")
         .put("kind", kind).put("generatedAtUtc", Instant.now().toString())
         .put("runId", runId).put("runStartedAtUtc", startedAt).put("capabilityProbe", probe)
         .put("scan", currentScan ?: JSONObject.NULL)
@@ -784,7 +786,7 @@ class MainActivity : Activity() {
         reportText = addText(evidence, "准备本机报告……", 13f, muted, false, 12)
         exportButton = button(evidence, "导出 JSON 报告") { exportReport() }
         exportButton.id = R.id.export_report
-        addText(evidence, "当前版本：0.3.1。P0 只传合成的 1 MiB 测试文件。公钥和监听端口需线下交换，每次收文件必须明确接受；真机互通结果以两端报告为准。", 13f, Color.rgb(242, 205, 142), false, 14)
+        addText(evidence, "当前版本：0.3.2。只传合成的 1 MiB 测试文件。首次仍需核对完整公钥；默认角色下可自动交换端口，每次收文件仍需明确接受。真机结果以两端报告为准。", 13f, Color.rgb(242, 205, 142), false, 14)
         button(content, "系统定位设置") { openSettings(Settings.ACTION_LOCATION_SOURCE_SETTINGS) }
         button(content, "应用权限设置") {
             try {
@@ -837,12 +839,16 @@ class MainActivity : Activity() {
             peerPinInput.isEnabled = !transferring
             peerPortInput.isEnabled = !transferring
             remoteAddressInput.isEnabled = !transferring
-            receiveTestButton.isEnabled = ::transfer.isInitialized && !transferring && path != null && trusted
+            automaticPortCheckBox.isEnabled = !transferring
+            receiveTestButton.isEnabled = ::transfer.isInitialized && !transferring && !transfer.retryLocked && path != null && trusted &&
+                (!automaticPortCheckBox.isChecked || !path.localIsOwner)
             sendTestButton.isEnabled = receiveTestButton.isEnabled
             cancelTransferButton.isEnabled = transferring
             acceptOfferButton.isEnabled = transferring && offerPending
             rejectOfferButton.isEnabled = transferring && offerPending
             if (path != null && !path.localIsOwner && remoteAddressInput.text.isBlank()) remoteAddressInput.setText(path.groupOwnerAddress)
+            if (path?.localIsOwner == true && automaticPortCheckBox.isChecked && !transferring)
+                transferStateText.text = "当前由手机建立直连，尚不能自动确认电脑地址。请用默认角色重新建链，或明确切换为手工实验。"
         }
         if (DirectPairingSession.radioGate.locked()) pairingText.text = "上次系统释放未确认，当前进程已锁定新的扫描和连接。请先结束系统 Direct 连接并重新打开应用。"
         else if (DirectPairingSession.radioGate.occupied() && !scanning && !stopping && !pairing.busy)
@@ -902,7 +908,7 @@ class MainActivity : Activity() {
         worker.execute {
             try {
                 val prepared = P0Identity()
-                val report = JSONObject().put("schema", "wanwei-public-identity/0.1").put("appVersion", "0.3.1")
+                val report = JSONObject().put("schema", "wanwei-public-identity/0.1").put("appVersion", "0.3.2")
                     .put("identity", prepared.fingerprint).put("identityEncoding", "sha256_der_subject_public_key_info_lowercase_hex")
                     .put("keyStore", "AndroidKeyStore_non_exportable_private_key")
                     .put("certificateDerBase64", android.util.Base64.encodeToString(prepared.certificate.encoded, android.util.Base64.NO_WRAP))
@@ -938,7 +944,7 @@ class MainActivity : Activity() {
         localPinText = addText(card, "正在准备本机受保护的应用身份……", 13f, Color.WHITE, false, 12).apply {
             id = R.id.transfer_local_pin; setTextIsSelectable(true)
         }
-        addText(card, "通过当面比对或已授权 USB 调试渠道，交换双方完整 64 位指纹，再确认信任。端口也要线下交给对方；这一步目前是实验操作。", 12f, muted, false, 8)
+        addText(card, "首次请当面核对双方完整公钥指纹。接收方先点击等待接收，发送方再点击发送；端口会沿本次直连链路自动交换，每个文件仍需确认接收。", 12f, muted, false, 8)
         fun input(idValue: Int, hintValue: String, numeric: Boolean = false): EditText = EditText(this).apply {
             id = idValue; hint = hintValue; textSize = 14f; setTextColor(Color.WHITE); setHintTextColor(muted)
             inputType = if (numeric) android.text.InputType.TYPE_CLASS_NUMBER else android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
@@ -961,12 +967,27 @@ class MainActivity : Activity() {
         }.apply { id = R.id.transfer_trust_peer }
         remoteAddressInput = input(R.id.transfer_remote_address, "对方本次直连 IPv4 地址")
         peerPortInput = input(R.id.transfer_peer_port, "对方本次接收端口", true)
+        automaticPortCheckBox = CheckBox(this).apply {
+            id = R.id.transfer_auto_port; text = "自动找到对方的接收端口"; setTextColor(Color.WHITE); isChecked = true
+            setOnCheckedChangeListener { _, checked ->
+                remoteAddressInput.visibility = if (checked) View.GONE else View.VISIBLE
+                peerPortInput.visibility = if (checked) View.GONE else View.VISIBLE
+                updateButtons()
+            }
+        }
+        card.addView(automaticPortCheckBox)
+        remoteAddressInput.visibility = View.GONE; peerPortInput.visibility = View.GONE
         transferStateText = addText(card, "先开启文件实验、建立 Direct 并核对完整公钥。", 14f, Color.WHITE, false, 12).apply { id = R.id.transfer_state }
         receiveTestButton = button(card, "等待接收 1 MiB 测试文件", true) {
-            if (::transfer.isInitialized && confirmedPeerPin != null) transfer.startReceiver(confirmedPeerPin!!)
+            if (::transfer.isInitialized && confirmedPeerPin != null)
+                transfer.startReceiver(confirmedPeerPin!!, automaticPortExchange = automaticPortCheckBox.isChecked)
             updateButtons()
         }.apply { id = R.id.transfer_listen }
         sendTestButton = button(card, "发送 1 MiB 测试文件", true) {
+            if (automaticPortCheckBox.isChecked) {
+                if (::transfer.isInitialized && confirmedPeerPin != null) transfer.startSenderAutomatically(confirmedPeerPin!!)
+                updateButtons(); return@button
+            }
             val port = peerPortInput.text.toString().toIntOrNull()
             if (port == null || port !in 1..65535) { transferStateText.text = "请输入对方页面显示的本次接收端口。"; return@button }
             if (::transfer.isInitialized && confirmedPeerPin != null) transfer.startSender(confirmedPeerPin!!, remoteAddressInput.text.toString().trim(), port)

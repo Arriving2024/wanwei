@@ -60,6 +60,11 @@ internal class DirectPairingSession(context: Context,
     private var removeAccepted = false
     private var absenceSince = 0L
     private var connected = false
+    private var ownedGroupWasEstablished = false
+    private var ownershipTainted = false
+    private var connectionEvidenceError = false
+    private var connectionQueryPending = false
+    private var establishedAbsence = PairingSafety.EstablishedAbsenceEvidence()
     private var fileExperiment = false
     private var usbLabFileExperiment = false
     private val directPath = AtomicReference<P0DirectPath?>(null)
@@ -111,6 +116,8 @@ internal class DirectPairingSession(context: Context,
         fileExperiment = enableFileExperiment; directPath.set(null)
         usbLabFileExperiment = fileExperiment && enableUsbLabFileExperiment
         preflightClear = false; connectIssued = false; accepted = null; connected = false
+        ownedGroupWasEstablished = false; ownershipTainted = false; connectionEvidenceError = false
+        connectionQueryPending = false; establishedAbsence = PairingSafety.EstablishedAbsenceEvidence()
         rediscoveryIssued = false; rediscoveryAccepted = false; rediscoveryStopConfirmed = false; peerQueryPending = false
         rediscoveryStopPending = false
         cancelConfirmed = false; removePending = false; removeAccepted = false; absenceSince = 0L; baselineGroupSignature = null
@@ -347,43 +354,62 @@ internal class DirectPairingSession(context: Context,
 
     /** Two fresh callbacks are required. A broadcast payload alone never authorizes group removal. */
     private fun queryConnection() {
-        if (!busy || !connectIssued || removePending) return
+        if (!busy || !connectIssued || removePending || connectionQueryPending) return
         val active = channel ?: return
         val thisAttempt = attempt
         val query = ++evidenceQuery
+        connectionQueryPending = true
+        val requestedAtMs = SystemClock.elapsedRealtime()
         var groupReceived = false
         var infoReceived = false
+        var groupCallbackAtMs: Long? = null
+        var infoCallbackAtMs: Long? = null
         var group: WifiP2pGroup? = null
         var info: WifiP2pInfo? = null
         var consumed = false
         val deadline = Runnable {
             if (busy && attempt == thisAttempt && query == evidenceQuery && !consumed) {
-                consumed = true; event("connection_evidence_callback_timeout")
+                consumed = true; connectionQueryPending = false; establishedAbsence.reset(); absenceSince = 0L
+                event("connection_evidence_callback_timeout").put("queryId", query)
             }
         }
         val receive = {
             if (busy && attempt == thisAttempt && query == evidenceQuery && !consumed && groupReceived && infoReceived) {
-                consumed = true; handler.removeCallbacks(deadline)
+                consumed = true; connectionQueryPending = false; handler.removeCallbacks(deadline)
+                if (group != null) {
+                    val attributable = PairingSafety.mayRemove(preflightClear, connectIssued, targetMatches(group!!),
+                        hasOtherParticipants(group!!), baselineGroupSignature == null || baselineGroupSignature == signature(group!!))
+                    if (!attributable) {
+                        ownershipTainted = true; establishedAbsence.reset()
+                        record?.put("establishedAbsenceOwnershipTainted", true)
+                    }
+                }
                 record?.put("connection", connectionJson(info))?.put("group", groupJson(group))
                 if (connectionSamples.length() < 80) connectionSamples.put(JSONObject()
                     .put("atUtc", Instant.now().toString()).put("elapsedMs", SystemClock.elapsedRealtime() - startedMs)
                     .put("connection", connectionJson(info)).put("group", groupJson(group)))
                 else record?.put("connectionSampleLimitReached", true)
-                if (stoppingAt != 0L) cleanupEvidence(group, info)
+                if (stoppingAt != 0L) cleanupEvidence(group, info, query, requestedAtMs, groupCallbackAtMs, infoCallbackAtMs)
                 else if (group != null && info?.groupFormed == true) established(group!!, info!!)
                 else if (connected) cancel("connection_lost")
             }
         }
         handler.postDelayed(deadline, 1_500)
         try {
-            manager!!.requestGroupInfo(active) { value -> groupReceived = true; group = value; receive() }
-            manager.requestConnectionInfo(active) { value -> infoReceived = true; info = value; receive() }
+            manager!!.requestGroupInfo(active) { value ->
+                groupReceived = true; group = value; groupCallbackAtMs = SystemClock.elapsedRealtime(); receive()
+            }
+            manager.requestConnectionInfo(active) { value ->
+                infoReceived = true; info = value; infoCallbackAtMs = SystemClock.elapsedRealtime(); receive()
+            }
         } catch (error: SecurityException) {
-            consumed = true; handler.removeCallbacks(deadline)
+            consumed = true; connectionQueryPending = false; connectionEvidenceError = true
+            establishedAbsence.reset(); absenceSince = 0L; handler.removeCallbacks(deadline)
             event("connection_evidence_permission_denied").put("errorType", error.javaClass.simpleName)
             if (stoppingAt == 0L) cancel("permission_denied")
         } catch (error: Exception) {
-            consumed = true; handler.removeCallbacks(deadline)
+            consumed = true; connectionQueryPending = false; connectionEvidenceError = true
+            establishedAbsence.reset(); absenceSince = 0L; handler.removeCallbacks(deadline)
             event("connection_evidence_exception").put("errorType", error.javaClass.simpleName)
             if (stoppingAt == 0L) cancel("connection_evidence_exception")
         }
@@ -393,6 +419,11 @@ internal class DirectPairingSession(context: Context,
         if (!targetMatches(group)) { event("unexpected_group_preserved"); cancel("unexpected_group"); return }
         if (baselineGroupSignature != null && signature(group) != baselineGroupSignature) { cancel("group_changed"); return }
         val usable = group.`interface`?.isNotBlank() == true && info.groupOwnerAddress != null && interfaceAddresses(group.`interface`).length() > 0
+        if (usable && !ownershipTainted && PairingSafety.mayRemove(preflightClear, connectIssued, targetMatches(group),
+                hasOtherParticipants(group), baselineGroupSignature == null || baselineGroupSignature == signature(group))) {
+            ownedGroupWasEstablished = true
+            record?.put("ownedEstablishedGroupVerified", true)
+        }
         if (usable && record?.optBoolean("actualP2pEndpointAvailable") != true) {
             record?.put("actualP2pEndpointAvailable", true)?.put("endpointAvailableAtUtc", Instant.now().toString())
                 ?.put("endpointGroup", JSONObject(groupJson(group).toString()))
@@ -430,6 +461,7 @@ internal class DirectPairingSession(context: Context,
         beforeCleanup?.invoke()
         clearPhaseTimer(); callbackTimer?.let(handler::removeCallbacks)
         stoppingAt = SystemClock.elapsedRealtime()
+        establishedAbsence.reset()
         record?.put("state", "stopping")?.put("finishReason", reason)?.put("cleanup", JSONObject().put("state", "checking"))
         event("cleanup_started").put("reason", reason)
         if (!connectIssued && !rediscoveryIssued) { finish("not_connected_no_radio_mutation", "本次尚未发起连接，已结束。"); return }
@@ -487,6 +519,7 @@ internal class DirectPairingSession(context: Context,
             })
         } catch (error: Exception) {
             cancelPending = false
+            connectionEvidenceError = true; establishedAbsence.reset()
             record?.optJSONObject("cleanup")?.put("cancelConnectRequestResult", "exception")?.put("errorType", error.javaClass.simpleName)
             event("cancel_connect_request_exception").put("requestNumber", requestNumber)
                 .put("errorType", error.javaClass.simpleName)
@@ -519,15 +552,46 @@ internal class DirectPairingSession(context: Context,
                 }
             })
         } catch (error: Exception) {
+            connectionEvidenceError = true; establishedAbsence.reset()
             record?.optJSONObject("cleanup")?.put("rediscoveryStopResult", "exception")?.put("rediscoveryStopErrorType", error.javaClass.simpleName)
         }
     }
 
-    private fun cleanupEvidence(group: WifiP2pGroup?, info: WifiP2pInfo?) {
+    private fun cleanupEvidence(group: WifiP2pGroup?, info: WifiP2pInfo?, query: Int, requestedAtMs: Long,
+                                groupCallbackAtMs: Long?, infoCallbackAtMs: Long?) {
+        val completedAtMs = SystemClock.elapsedRealtime()
+        val freshAbsent = establishedAbsence.observe(query, requestedAtMs, groupCallbackAtMs, infoCallbackAtMs,
+            completedAtMs, stoppingAt, group == null, info?.groupFormed)
+        val pendingOperation = cancelPending || removePending || rediscoveryStopPending || peerQueryPending ||
+            connectionQueryPending || accepted == null
+        val cleanup = record?.optJSONObject("cleanup")
+        val samples = cleanup?.optJSONArray("absenceEvidenceSamples") ?: JSONArray().also { cleanup?.put("absenceEvidenceSamples", it) }
+        if (samples.length() < 40) samples.put(JSONObject().put("queryId", query)
+            .put("queryRequestedElapsedMs", requestedAtMs - startedMs)
+            .put("groupCallbackElapsedMs", groupCallbackAtMs?.minus(startedMs) ?: JSONObject.NULL)
+            .put("connectionCallbackElapsedMs", infoCallbackAtMs?.minus(startedMs) ?: JSONObject.NULL)
+            .put("elapsedMs", completedAtMs - startedMs).put("freshPairedAbsence", freshAbsent)
+            .put("groupPresent", group != null).put("groupFormed", info?.groupFormed ?: JSONObject.NULL)
+            .put("operationPending", pendingOperation).put("consecutiveAbsenceSamples", establishedAbsence.consecutiveSamples)
+            .put("absenceObservedSpanMs", establishedAbsence.observedSpanMs))
+        else cleanup?.put("absenceEvidenceSampleLimitReached", true)
         if (group == null && info?.groupFormed == false) {
+            if (!freshAbsent) { absenceSince = 0L; return }
+            if (PairingSafety.mayConfirmEstablishedAbsence(preflightClear, ownedGroupWasEstablished,
+                    ownershipTainted, connectionEvidenceError, rediscoveryStopConfirmed, accepted == true,
+                    pendingOperation, establishedAbsence)) {
+                cleanup?.put("ownedConnectionAbsentConfirmed", true)?.put("cancelConnectAcknowledged", cancelConfirmed)
+                    ?.put("cancelConnectResultOverridden", false)?.put("requiresFreshPreflightOnNextAttempt", true)
+                    ?.put("absenceEvidenceSource", "fresh_same_channel_paired_group_and_connection_callbacks")
+                event("established_connection_absence_confirmed").put("distinctAbsenceQueries", establishedAbsence.consecutiveSamples)
+                    .put("observedSpanMs", establishedAbsence.observedSpanMs).put("cancelConnectAcknowledged", cancelConfirmed)
+                finish("established_connection_absent_confirmed", "本次已建立的 Direct 连接已连续回读确认消失；没有把取消协商失败记为成功。可重新扫描，下次仍先检查已有连接。")
+                return
+            }
             if (absenceSince == 0L) absenceSince = SystemClock.elapsedRealtime()
             val drained = SystemClock.elapsedRealtime() - absenceSince >= 2_000
-            val mayFinish = drained && (!rediscoveryIssued || rediscoveryStopConfirmed) && (cancelConfirmed || accepted == false || record?.optJSONObject("cleanup")?.optString("removeGroupRequestResult") == "accepted")
+            val mayFinish = drained && !ownershipTainted && !connectionEvidenceError && !pendingOperation &&
+                (!rediscoveryIssued || rediscoveryStopConfirmed) && (cancelConfirmed || accepted == false || record?.optJSONObject("cleanup")?.optString("removeGroupRequestResult") == "accepted")
             if (mayFinish) finish("no_group_observed_after_cancel", "本次已结束；系统回读未发现 Direct 组。可以重新扫描。")
             return
         }
@@ -641,16 +705,20 @@ internal class DirectPairingSession(context: Context,
         clearPhaseTimer()
         tick?.let(handler::removeCallbacks); cleanupTimer?.let(handler::removeCallbacks); callbackTimer?.let(handler::removeCallbacks)
         record?.put("state", "finished")?.put("finishedAtUtc", Instant.now().toString())
-            ?.put("elapsedMs", SystemClock.elapsedRealtime() - startedMs)?.put("retryLocked", retryLocked)
+            ?.put("elapsedMs", SystemClock.elapsedRealtime() - startedMs)
         val cleanup = record?.optJSONObject("cleanup") ?: JSONObject().also { record?.put("cleanup", it) }
         cleanup.put("state", cleanupState).put("originalOrUnattributedGroupRemoved", false)
         observer?.let { record?.put("wifiObservation", it.stop()) }
         if (receiverRegistered) {
             runCatching { app.unregisterReceiver(receiver) }; receiverRegistered = false
         }
-        if (Build.VERSION.SDK_INT >= 27) runCatching { channel?.close() }
+        if (Build.VERSION.SDK_INT >= 27) runCatching { channel?.close() }.onFailure { error ->
+            localRetryLocked = true
+            cleanup.put("channelCloseErrorType", error.javaClass.simpleName)
+        }
         channel = null; targetAddress = null
         radioGate.release(ownerId, localRetryLocked)
+        record?.put("retryLocked", retryLocked)
         changed(message)
     }
     private fun event(kind: String): JSONObject {

@@ -12,7 +12,6 @@ internal sealed class P0TransferWindow : Window
     private readonly string reportDirectory;
     private readonly CancellationTokenSource lifetime;
     private readonly TextBox pin = new() { FontSize = 14, MaxLength = 64, Margin = new Thickness(0, 6, 0, 10) };
-    private readonly TextBox port = new() { FontSize = 17, MaxLength = 5, Text = "", Margin = new Thickness(0, 6, 0, 10) };
     private readonly TextBlock status = Label("请当面核对两端完整指纹，再确认本次信任。");
     private readonly TextBlock endpoint = Label("");
     private readonly TextBox log = new() { IsReadOnly = true, TextWrapping = TextWrapping.Wrap, FontSize = 13, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
@@ -25,7 +24,7 @@ internal sealed class P0TransferWindow : Window
     private string? confirmedPin;
     private CancellationTokenSource? transfer;
     private bool closing;
-    private bool cleanupUnconfirmed;
+    private volatile bool cleanupUnconfirmed;
     internal Task ClosedTask => closed.Task;
     internal bool ResourceReleaseConfirmed => !cleanupUnconfirmed;
 
@@ -42,8 +41,9 @@ internal sealed class P0TransferWindow : Window
         content.Children.Add(Label("本机完整公钥指纹（请在手机上比对）："));
         content.Children.Add(new TextBox { Text = identity.Fingerprint, IsReadOnly = true, FontSize = 16, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 5, 0, 12) });
         content.Children.Add(Label("对端完整公钥指纹：")); content.Children.Add(pin); content.Children.Add(trust);
-        content.Children.Add(Label("发送时填写对端页面显示的接收端口：")); content.Children.Add(port);
-        endpoint.Text = $"本次直连：{path.Local} → {path.Remote}\n点击接收后显示本机动态端口；监听最多等待 30 秒。";
+        content.Children.Add(Label("首次仍需核对完整指纹；发送前，请先让对方点击“接收”。端口会通过本次直连自动交换。"));
+        content.Children.Add(Label("当前手机端自动交换仅支持手机作为 Direct 客户端、电脑建组的实验角色。", 12));
+        endpoint.Text = $"本次直连：{path.Local} → {path.Remote}\n接收等待最多 30 秒，自动取得端口最多 10 秒；取得端口后仍须验证双方身份。";
         content.Children.Add(endpoint);
         var buttons = new WrapPanel(); foreach (var b in new[] { receive, send, cancel }) buttons.Children.Add(b); content.Children.Add(buttons);
         status.Margin = new Thickness(0, 10, 0, 10); content.Children.Add(status);
@@ -69,31 +69,52 @@ internal sealed class P0TransferWindow : Window
     private void UpdateButtons()
     {
         bool idle = transfer is null && !lifetime.IsCancellationRequested && !cleanupUnconfirmed;
-        trust.IsEnabled = pin.IsEnabled = idle; port.IsEnabled = idle;
+        trust.IsEnabled = pin.IsEnabled = idle;
         receive.IsEnabled = send.IsEnabled = idle && confirmedPin is not null && path.Verify();
         cancel.IsEnabled = transfer is not null;
     }
     private async Task StartAsync(bool receiver)
     {
         if (transfer is not null || confirmedPin is null) return;
-        int remotePort = 0;
-        if (!receiver && (!int.TryParse(port.Text, out remotePort) || remotePort is < 1 or > 65535)) { status.Text = "先填写手机显示的接收端口。"; return; }
+        string trustedPeer = confirmedPin;
         transfer = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); UpdateButtons();
         try
         {
-            var session = new P0Transfer(identity, reportDirectory, value => Dispatcher.BeginInvoke(() => {
+            int remotePort = 0;
+            if (!receiver)
+            {
+                status.Text = "正在自动取得对方接收端口…请先让对方点击“接收”。";
+                remotePort = await P0Rendezvous.ResolveAsync(path, identity.Fingerprint, trustedPeer, transfer.Token);
+                // This is only an unauthenticated hint. P0Transfer still verifies
+                // the native socket endpoints and the complete pinned certificate.
+            }
+            var session = new P0Transfer(identity, reportDirectory, value => {
+                // Gate retries before RunAsync can return, even if the UI queue
+                // has not yet rendered the final cleanup status.
                 if (value.CleanupFinished && (!value.SocketClosed || !value.TemporaryFileCleanupConfirmed)) cleanupUnconfirmed = true;
+                Dispatcher.BeginInvoke(() => {
                 status.Text = value.State switch {
-                    "listening" => $"本机接收端口：{value.SocketLocalPort} · 请让手机发送", "tls_authenticating" => "正在验证双方身份…",
+                    "listening" => $"已等待接收，端口自动交换中 · 请让手机点击发送（本机端口 {value.SocketLocalPort}）", "tls_authenticating" => "正在验证双方身份…",
                     "awaiting_receive_confirmation" => "等待你确认接收", "receiving" => "正在接收…", "sending" => "正在发送…",
                     "complete" => value.LocalSaved ? "已接收并保存，内容校验通过。" : "对端已确认保存，内容校验通过。",
-                    "rejected" => "本次接收已拒绝", "cancelled" => "本次传输已取消", "failed" => "传输失败：" + value.ErrorCode,
+                    "rejected" => "本次接收已拒绝", "cancelled" => "本次传输已取消",
+                    "failed" when value.ErrorCode == "RENDEZVOUS_UNAVAILABLE" => "无法开放本次接收端口交换，本轮接收已停止。",
+                    "failed" => "传输失败：" + value.ErrorCode,
                     _ => value.State
                 };
                 log.Text = JsonSerializer.Serialize(value, ReportStore.Json);
                 UpdateButtons();
-            }));
-            await session.RunAsync(receiver, path, confirmedPin, remotePort, ConfirmOfferAsync, transfer.Token);
+                });
+            });
+            await session.RunAsync(receiver, path, trustedPeer, remotePort, ConfirmOfferAsync, transfer.Token,
+                listenerReady: receiver ? (readyPort, token) => P0RendezvousResponder.Start(path, identity.Fingerprint, trustedPeer, readyPort, token) : null,
+                portExchange: "native_udp_rendezvous_untrusted_hint");
+        }
+        catch (OperationCanceledException) when (transfer.IsCancellationRequested) { status.Text = "本次传输已取消。"; }
+        catch (P0Exception e)
+        {
+            if (e.Code == "RENDEZVOUS_CLEANUP_UNCONFIRMED") cleanupUnconfirmed = true;
+            status.Text = e.Code == "RENDEZVOUS_TIMEOUT" ? "未取得对方接收端口。请确认对方已核对指纹并点击接收，且当前直连仍有效。" : "实验未完成：" + e.Code;
         }
         catch (Exception e) { status.Text = "实验未完成：" + DirectDiscovery.ErrorCode(e); }
         finally

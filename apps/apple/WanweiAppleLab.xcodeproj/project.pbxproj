@@ -7,6 +7,7 @@
         A00000000000000000000001 = {isa = PBXBuildFile; fileRef = B00000000000000000000001; };
         A00000000000000000000002 = {isa = PBXBuildFile; fileRef = B00000000000000000000002; };
         A00000000000000000000003 = {isa = PBXBuildFile; fileRef = B00000000000000000000003; };
+        A00000000000000000000004 = {isa = PBXBuildFile; fileRef = B00000000000000000000007; };
 
         B00000000000000000000001 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WanweiAppleLabApp.swift; sourceTree = "<group>"; };
         B00000000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -14,6 +15,7 @@
         B00000000000000000000004 = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
         B00000000000000000000005 = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = WanweiAppleLab.entitlements; sourceTree = "<group>"; };
         B00000000000000000000006 = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = WanweiAppleLab.app; sourceTree = BUILT_PRODUCTS_DIR; };
+        B00000000000000000000007 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingPreparationView.swift; sourceTree = "<group>"; };
 
         C00000000000000000000001 = {
             isa = PBXGroup;
@@ -22,13 +24,13 @@
         };
         C00000000000000000000002 = {
             isa = PBXGroup;
-            children = (B00000000000000000000001, B00000000000000000000002, B00000000000000000000003, B00000000000000000000004, B00000000000000000000005);
+            children = (B00000000000000000000001, B00000000000000000000002, B00000000000000000000003, B00000000000000000000007, B00000000000000000000004, B00000000000000000000005);
             path = WanweiAppleLab;
             sourceTree = "<group>";
         };
         C00000000000000000000003 = {isa = PBXGroup; children = (B00000000000000000000006); name = Products; sourceTree = "<group>"; };
 
-        D00000000000000000000001 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000001, A00000000000000000000002, A00000000000000000000003); runOnlyForDeploymentPostprocessing = 0; };
+        D00000000000000000000001 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000001, A00000000000000000000002, A00000000000000000000003, A00000000000000000000004); runOnlyForDeploymentPostprocessing = 0; };
         D00000000000000000000002 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
         D00000000000000000000003 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 
@@ -105,11 +107,11 @@
             buildSettings = {
                 CODE_SIGN_ENTITLEMENTS = WanweiAppleLab/WanweiAppleLab.entitlements;
                 CODE_SIGN_STYLE = Automatic;
-                CURRENT_PROJECT_VERSION = 1;
+                CURRENT_PROJECT_VERSION = 2;
                 GENERATE_INFOPLIST_FILE = NO;
                 INFOPLIST_FILE = WanweiAppleLab/Info.plist;
                 LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");
-                MARKETING_VERSION = 0.1.0;
+                MARKETING_VERSION = 0.1.1;
                 PRODUCT_BUNDLE_IDENTIFIER = dev.wanwei.applelab;
                 PRODUCT_NAME = "$(TARGET_NAME)";
                 SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -125,11 +127,11 @@
             buildSettings = {
                 CODE_SIGN_ENTITLEMENTS = WanweiAppleLab/WanweiAppleLab.entitlements;
                 CODE_SIGN_STYLE = Automatic;
-                CURRENT_PROJECT_VERSION = 1;
+                CURRENT_PROJECT_VERSION = 2;
                 GENERATE_INFOPLIST_FILE = NO;
                 INFOPLIST_FILE = WanweiAppleLab/Info.plist;
                 LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");
-                MARKETING_VERSION = 0.1.0;
+                MARKETING_VERSION = 0.1.1;
                 PRODUCT_BUNDLE_IDENTIFIER = dev.wanwei.applelab;
                 PRODUCT_NAME = "$(TARGET_NAME)";
                 SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";

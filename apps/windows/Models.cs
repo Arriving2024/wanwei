@@ -71,7 +71,7 @@ public sealed record PairingSessionResult(string Outcome, bool StartAttempted, b
 public sealed class LabReport
 {
     public string Schema { get; } = "wanwei.windows.probe/1";
-    public string AppVersion { get; } = "0.3.1";
+    public string AppVersion { get; } = "0.3.2";
     public string RunId { get; } = Guid.NewGuid().ToString("N");
     public DateTimeOffset StartedUtc { get; } = DateTimeOffset.UtcNow;
     public string Os { get; } = Environment.OSVersion.VersionString;
