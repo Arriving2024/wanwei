@@ -1,6 +1,7 @@
-param([switch]$ConfirmPairing, [switch]$PrepareOnly, [switch]$SelectOnly, [switch]$ConnectSelected, [switch]$PreferPhoneGroupOwner, [switch]$FileTransferLab)
+param([switch]$ConfirmPairing, [switch]$PrepareOnly, [switch]$SelectOnly, [switch]$ConnectSelected, [switch]$PreferPhoneGroupOwner, [switch]$FileTransferLab, [string]$ExpectedVisiblePeerName)
 $ErrorActionPreference = 'Stop'
 if ((@($ConfirmPairing,$PrepareOnly,$SelectOnly,$ConnectSelected) | Where-Object {$_}).Count -ne 1) { throw 'Choose exactly one preparation, selection or connection mode.' }
+if ($ExpectedVisiblePeerName -and ($ExpectedVisiblePeerName.Length -gt 48 -or $ExpectedVisiblePeerName -match '[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]')) { throw 'Expected peer name must be a short, single-line display label.' }
 $wanweiRoot = Split-Path -Parent $PSScriptRoot
 $wanweiAdb = Join-Path $wanweiRoot '.tools\android-sdk\platform-tools\adb.exe'
 $wanweiPackage = 'dev.wanwei.androidlab'
@@ -132,8 +133,20 @@ if ($null -eq $scan -or $scan.enabled -ne 'true') { throw 'Discovery did not set
 Tap-WanweiNode (Find-WanweiControl 'dev.wanwei.androidlab:id/pair_candidate_select')
 $xml = Read-WanweiUi
 $candidates = $xml.SelectNodes("//node[@package='$wanweiPackage' and @resource-id='android:id/text1']")
-if ($candidates.Count -ne 1 -or $candidates[0].text -notmatch '^候选 1 · [0-9a-f]{12}') { throw 'Expected exactly one anonymous candidate; manual selection required.' }
-Tap-WanweiNode $candidates[0]
+if ($ExpectedVisiblePeerName) {
+    # This is only a visible selection hint for the operator's own test computer.
+    # Names are unauthenticated; ordinary pairing, full pin trust and OFFER consent remain required.
+    $matched = @($candidates | Where-Object {
+        $lines = $_.text -split "`n"
+        $lines.Count -eq 3 -and $lines[0] -cmatch '^候选 [1-9][0-9]* · [0-9a-f]{12}$' -and
+            $lines[1] -ceq ('系统名称（未认证）：' + $ExpectedVisiblePeerName)
+    })
+    if ($matched.Count -ne 1) { throw 'Expected exactly one displayed name matching the local test computer; no candidate was selected.' }
+    Tap-WanweiNode $matched[0]
+} else {
+    if ($candidates.Count -ne 1 -or $candidates[0].text -notmatch '^候选 1 · [0-9a-f]{12}') { throw 'Expected exactly one anonymous candidate; manual selection required.' }
+    Tap-WanweiNode $candidates[0]
+}
 if ($SelectOnly) {
     $null = Find-WanweiControl 'dev.wanwei.androidlab:id/pair_connect'
     Write-Output 'A single candidate is selected; no connection request has been sent.'

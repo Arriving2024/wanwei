@@ -1,10 +1,13 @@
 using System.Text;
+using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Markup;
 using System.Windows.Threading;
+using System.Windows.Shell;
 using Windows.Devices.WiFiDirect;
 
 namespace Wanwei;
@@ -29,6 +32,9 @@ public sealed class MainWindow : Window, IPairingUi
     private bool restartRequired;
     private bool rejectAllRequests;
     private Border? pairingPrompt;
+    private long? pairingPromptRemainingMs;
+    private Button? pairingPromptAccept;
+    private Button? pairingPromptReject;
     private readonly CheckBox transferExperiment = new() { Content = "实验：1 MiB 安全互传 · 连接最多保留 180 秒", Margin = new Thickness(0, 5, 0, 5), Foreground = Brushes.LightBlue };
     private readonly P0Identity identity;
     private bool transferEnabledForRun;
@@ -244,6 +250,11 @@ public sealed class MainWindow : Window, IPairingUi
     }
     public async Task<PairingDecision> ConfirmAsync(PairingPrompt prompt, CancellationToken cancellation)
     {
+        // The supplied remainder belongs to the original shared negotiation deadline.
+        // Start before any dispatcher handoff so queued UI work never grants extra time.
+        var promptClock = Stopwatch.StartNew();
+        long? RemainingMs() => prompt.RemainingStageMs is { } budget
+            ? Math.Max(0L, (long)budget - promptClock.ElapsedMilliseconds) : null;
         // Smoke runs use the actual STA dispatcher but always decline requests.
         if (rejectAllRequests) return new(false);
         cancellation.ThrowIfCancellationRequested();
@@ -255,54 +266,141 @@ public sealed class MainWindow : Window, IPairingUi
             });
             return new(accepted);
         }
+        using var promptCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+        if (RemainingMs() is { } initialRemaining)
+        {
+            if (initialRemaining == 0) return new(false);
+            promptCancellation.CancelAfter(TimeSpan.FromMilliseconds(initialRemaining));
+        }
         var decision = new TaskCompletionSource<PairingDecision>(TaskCreationOptions.RunContinuationsAsynchronously);
         Border? surface = null;
-        await Dispatcher.InvokeAsync(() => {
-            cancellation.ThrowIfCancellationRequested();
-            if (pairingPrompt is not null) { decision.TrySetResult(new(false)); return; }
-            var content = new StackPanel { Margin = new Thickness(25), MaxWidth = 470 };
-            content.Children.Add(Text(prompt.Kind == "ConnectionRequest" ? "附近设备请求直连" : "确认本次系统配对", 23, "#FFFFFF"));
-            content.Children.Add(Text("候选 " + prompt.PeerToken[..Math.Min(8, prompt.PeerToken.Length)] +
-                " · 万维应用身份尚未认证", 13, "#FFCB88", new Thickness(0, 14, 0, 10)));
-            string instruction = prompt.Kind switch {
-                "ConnectionRequest" => "仅在你正用另一台设备发起连接时接受。本次连接计时结束即释放本应用的连接对象；系统可能保留配对记录。",
-                "ConfirmOnly" => "系统要求确认配对。请同时检查手机上的连接提示。",
-                "DisplayPin" => "请在对端输入或确认下方 PIN。PIN 仅显示在本次页面，不保存到报告。",
-                "ConfirmPinMatch" => "请核对两端显示的 PIN 完全一致，再接受。",
-                "ProvidePin" => "输入对端显示的 4 位或 8 位数字 PIN。PIN 不保存到报告。",
-                _ => "此配对方式尚未支持，请拒绝。"
-            };
-            content.Children.Add(Text(instruction, 15, "#C8D8F1", new Thickness(0, 0, 0, 15)));
-            if (prompt.RemainingStageMs is { } remaining)
-                content.Children.Add(Text($"显示本提示时剩余约 {Math.Ceiling(remaining / 1000.0)} 秒；两次确认与建连共用同一时限。", 13, "#FFCB88", new Thickness(0, 0, 0, 15)));
-            if (prompt.Kind is "DisplayPin" or "ConfirmPinMatch")
-                content.Children.Add(Text(prompt.Pin ?? "PIN 未提供", 28, "#FFFFFF", new Thickness(0, 0, 0, 15)));
-            var input = new TextBox { FontSize = 23, MaxLength = 8, Margin = new Thickness(0, 0, 0, 15) };
-            if (prompt.Kind == "ProvidePin") content.Children.Add(input);
-            var controls = new WrapPanel();
-            var reject = MakeButton("拒绝本次请求", false); reject.IsCancel = true; reject.IsDefault = true;
-            var accept = MakeButton("接受本次请求", true);
-            reject.Click += (_, _) => decision.TrySetResult(new(false));
-            accept.Click += (_, _) => {
-                if (prompt.Kind == "ProvidePin" && !DirectPairing.ValidPin(input.Text)) { input.Focus(); return; }
-                decision.TrySetResult(new(true, prompt.Kind == "ProvidePin" ? input.Text : null));
-            };
-            controls.Children.Add(reject); controls.Children.Add(accept); content.Children.Add(controls);
-            surface = new Border { Background = Brush("#18273F"), BorderBrush = Brush("#84B9FF"),
-                BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(16), Child = content,
-                HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
-            pairingPrompt = surface;
-            Grid.SetRowSpan(surface, 5); System.Windows.Controls.Panel.SetZIndex(surface, 10);
-            ((Grid)Content).Children.Add(surface); reject.Focus();
-        }, DispatcherPriority.Normal, cancellation);
-        try { return await decision.Task.WaitAsync(cancellation).ConfigureAwait(false); }
+        DispatcherTimer? countdownTimer = null;
+        EventHandler? countdownTick = null;
+        string? previousTitle = null;
+        TaskbarItemInfo? previousTaskbar = null;
+        bool attentionApplied = false;
+        string terminalStage = "cancelled";
+        var safeKind = prompt.Kind is "ConnectionRequest" or "ConfirmOnly" or "DisplayPin" or "ConfirmPinMatch" or "ProvidePin"
+            ? prompt.Kind : "Unsupported";
+        void Log(string stage)
+        {
+            // Never include the peer token, PIN, identity, or arbitrary exception text.
+            activity.AppendText($"配对提示 · {safeKind} · {stage} · elapsed_ms={promptClock.ElapsedMilliseconds}\n");
+            activity.ScrollToEnd();
+        }
+        PairingDecision answer = new(false);
+        try
+        {
+            await Dispatcher.InvokeAsync(() => {
+                Log("queued");
+                promptCancellation.Token.ThrowIfCancellationRequested();
+                if (RemainingMs() == 0) { terminalStage = "expired_before_presenting"; decision.TrySetResult(new(false)); return; }
+                if (pairingPrompt is not null) { terminalStage = "another_prompt_visible_rejected"; decision.TrySetResult(new(false)); return; }
+                var content = new StackPanel { Margin = new Thickness(25), MaxWidth = 470 };
+                content.Children.Add(Text("需要你确认连接", 14, "#84B9FF", new Thickness(0, 0, 0, 8)));
+                content.Children.Add(Text(prompt.Kind == "ConnectionRequest" ? "附近设备请求直连" : "确认本次系统配对", 23, "#FFFFFF"));
+                content.Children.Add(Text("候选 " + prompt.PeerToken[..Math.Min(8, prompt.PeerToken.Length)] +
+                    " · 万维应用身份尚未认证", 13, "#FFCB88", new Thickness(0, 14, 0, 10)));
+                string instruction = prompt.Kind switch {
+                    "ConnectionRequest" => "仅在你正用另一台设备发起连接时接受。本次连接计时结束即释放本应用的连接对象；系统可能保留配对记录。",
+                    "ConfirmOnly" => "系统要求确认配对。请同时检查手机上的连接提示。",
+                    "DisplayPin" => "请在对端输入或确认下方 PIN。PIN 仅显示在本次页面，不保存到报告。",
+                    "ConfirmPinMatch" => "请核对两端显示的 PIN 完全一致，再接受。",
+                    "ProvidePin" => "输入对端显示的 4 位或 8 位数字 PIN。PIN 不保存到报告。",
+                    _ => "此配对方式尚未支持，请拒绝。"
+                };
+                content.Children.Add(Text(instruction, 15, "#C8D8F1", new Thickness(0, 0, 0, 15)));
+                var countdown = Text("", 15, "#FFCB88", new Thickness(0, 0, 0, 15));
+                content.Children.Add(countdown);
+                if (prompt.Kind is "DisplayPin" or "ConfirmPinMatch")
+                    content.Children.Add(Text(prompt.Pin ?? "PIN 未提供", 28, "#FFFFFF", new Thickness(0, 0, 0, 15)));
+                var input = new TextBox { FontSize = 23, MaxLength = 8, Margin = new Thickness(0, 0, 0, 15) };
+                if (prompt.Kind == "ProvidePin") content.Children.Add(input);
+                var controls = new WrapPanel();
+                var reject = MakeButton("拒绝本次请求", false); reject.IsCancel = true; reject.IsDefault = true;
+                var accept = MakeButton("接受本次请求", true);
+                pairingPromptAccept = accept; pairingPromptReject = reject;
+                void Decide(bool accepted)
+                {
+                    // Check the clock directly: a delayed dispatcher tick cannot authorize a stale click.
+                    if (cancellation.IsCancellationRequested || promptCancellation.IsCancellationRequested || RemainingMs() == 0)
+                    {
+                        accept.IsEnabled = reject.IsEnabled = false;
+                        terminalStage = cancellation.IsCancellationRequested ? "cancelled" : "expired";
+                        decision.TrySetResult(new(false));
+                        return;
+                    }
+                    if (decision.Task.IsCompleted) return;
+                    if (accepted && prompt.Kind == "ProvidePin" && !DirectPairing.ValidPin(input.Text)) { input.Focus(); return; }
+                    if (decision.TrySetResult(new(accepted, accepted && prompt.Kind == "ProvidePin" ? input.Text : null)))
+                    {
+                        terminalStage = accepted ? "accept_clicked" : "reject_clicked";
+                        accept.IsEnabled = reject.IsEnabled = false;
+                    }
+                }
+                reject.Click += (_, _) => Decide(false);
+                accept.Click += (_, _) => Decide(true);
+                controls.Children.Add(reject); controls.Children.Add(accept); content.Children.Add(controls);
+                var card = new Border { Background = Brush("#18273F"), BorderBrush = Brush("#84B9FF"),
+                    BorderThickness = new Thickness(2), CornerRadius = new CornerRadius(16), Child = content,
+                    HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+                surface = new Border { Background = Brush("#DB060B16"), Child = card };
+                KeyboardNavigation.SetTabNavigation(surface, KeyboardNavigationMode.Cycle);
+                KeyboardNavigation.SetControlTabNavigation(surface, KeyboardNavigationMode.Cycle);
+                pairingPrompt = surface;
+                Grid.SetRowSpan(surface, 5); System.Windows.Controls.Panel.SetZIndex(surface, 10);
+                ((Grid)Content).Children.Add(surface);
+                previousTitle = Title; previousTaskbar = TaskbarItemInfo;
+                attentionApplied = true;
+                Title = "【需要确认连接】" + previousTitle;
+                TaskbarItemInfo = new TaskbarItemInfo { ProgressState = TaskbarItemProgressState.Paused,
+                    ProgressValue = 1, Description = "万维：需要确认连接" };
+                if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+                Log("presented");
+                bool activated = Activate();
+                Log(activated ? "activation_succeeded" : "activation_not_granted");
+                reject.Focus();
+                void RefreshCountdown()
+                {
+                    pairingPromptRemainingMs = RemainingMs();
+                    countdown.Text = pairingPromptRemainingMs is { } remaining
+                        ? $"剩余 {Math.Ceiling(remaining / 1000.0)} 秒；两次确认与建连共用原来的时限。"
+                        : "请及时确认；系统协商结束后，本提示自动关闭。";
+                    if (cancellation.IsCancellationRequested || promptCancellation.IsCancellationRequested || pairingPromptRemainingMs == 0)
+                    {
+                        accept.IsEnabled = reject.IsEnabled = false;
+                        terminalStage = cancellation.IsCancellationRequested ? "cancelled" : "expired";
+                        decision.TrySetResult(new(false));
+                    }
+                }
+                RefreshCountdown();
+                countdownTimer = new DispatcherTimer(DispatcherPriority.Normal, Dispatcher) { Interval = TimeSpan.FromMilliseconds(200) };
+                countdownTick = (_, _) => RefreshCountdown();
+                countdownTimer.Tick += countdownTick; countdownTimer.Start();
+            }, DispatcherPriority.Normal, promptCancellation.Token);
+            answer = await decision.Task.WaitAsync(promptCancellation.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellation.IsCancellationRequested && promptCancellation.IsCancellationRequested)
+        {
+            terminalStage = surface is null ? "expired_before_presenting" : "expired";
+        }
         finally
         {
             await Dispatcher.InvokeAsync(() => {
+                if (countdownTimer is not null) { countdownTimer.Stop(); if (countdownTick is not null) countdownTimer.Tick -= countdownTick; }
                 if (surface is not null) ((Grid)Content).Children.Remove(surface);
-                if (ReferenceEquals(pairingPrompt, surface)) pairingPrompt = null;
+                if (surface is not null && ReferenceEquals(pairingPrompt, surface))
+                {
+                    pairingPrompt = null; pairingPromptRemainingMs = null;
+                    pairingPromptAccept = pairingPromptReject = null;
+                }
+                if (attentionApplied) { Title = previousTitle!; TaskbarItemInfo = previousTaskbar; }
+                Log(cancellation.IsCancellationRequested ? "cancelled" : terminalStage);
             });
         }
+        cancellation.ThrowIfCancellationRequested();
+        // Cleanup dispatch also consumes the original budget, never allowing a late acceptance.
+        return answer.Accept && (promptCancellation.IsCancellationRequested || RemainingMs() == 0) ? new(false) : answer;
     }
     public async Task<Windows.Foundation.IAsyncOperation<WiFiDirectDevice>> BeginConnectionAsync(string deviceId, CancellationToken cancellation)
     {
@@ -420,18 +518,48 @@ public sealed class MainWindow : Window, IPairingUi
     internal async Task PromptSmokeAsync(string previewPath)
     {
         // Synthetic prompt only; no publisher, device, pairing or socket API.
+        string originalTitle = Title;
+        var originalTaskbar = TaskbarItemInfo;
+        void AssertPromptRestored()
+        {
+            if (pairingPrompt is not null || pairingPromptRemainingMs is not null || pairingPromptAccept is not null || pairingPromptReject is not null)
+                throw new InvalidOperationException("Finished prompt retained its overlay or controls.");
+            if (Title != originalTitle || !ReferenceEquals(TaskbarItemInfo, originalTaskbar))
+                throw new InvalidOperationException("Finished prompt retained its title or taskbar attention.");
+        }
         using var cancel = new CancellationTokenSource();
-        var pending = ConfirmAsync(new("synthetic-ui-preview", "ConfirmPinMatch", "12345678"), cancel.Token);
+        var pending = ConfirmAsync(new("synthetic-ui-preview", "ConfirmPinMatch", "12345678", 8_000), cancel.Token);
         await Task.Delay(100);
         if (pairingPrompt is null) throw new InvalidOperationException("Synthetic pairing prompt was not rendered.");
+        if (!Title.StartsWith("【需要确认连接】", StringComparison.Ordinal) || TaskbarItemInfo?.ProgressState != TaskbarItemProgressState.Paused)
+            throw new InvalidOperationException("Synthetic pairing prompt had no visible attention state.");
+        if (pairingPromptReject is not { IsDefault: true } || pairingPromptAccept is not { IsDefault: false })
+            throw new InvalidOperationException("Pairing acceptance became the default action.");
+        long firstRemaining = pairingPromptRemainingMs ?? throw new InvalidOperationException("Prompt had no remaining budget.");
+        await Task.Delay(1_100);
+        if (pairingPromptRemainingMs is not { } secondRemaining || secondRemaining >= firstRemaining || secondRemaining <= 0)
+            throw new InvalidOperationException("Prompt countdown did not decrease within the original budget.");
         RenderPreview(previewPath);
         cancel.Cancel();
         try { _ = await pending; throw new InvalidOperationException("Prompt cancellation was ignored."); }
         catch (OperationCanceledException) { }
-        if (pairingPrompt is not null) throw new InvalidOperationException("Cancelled prompt remained visible.");
-        try { _ = await ConfirmAsync(new("synthetic", "ConnectionRequest", null), cancel.Token); throw new InvalidOperationException("Pre-cancel prompt was shown."); }
+        AssertPromptRestored();
+        try { _ = await ConfirmAsync(new("synthetic", "ConnectionRequest", null, 8_000), cancel.Token); throw new InvalidOperationException("Pre-cancel prompt was shown."); }
         catch (OperationCanceledException) { }
-        if (pairingPrompt is not null) throw new InvalidOperationException("Pre-cancel prompt leaked.");
+        AssertPromptRestored();
+        // Keep the dispatcher busy past a short synthetic deadline, then invoke the
+        // stale button before queued timer/cleanup callbacks can run. Its click guard
+        // must reject even though no countdown refresh has disabled the control yet.
+        var expiring = ConfirmAsync(new("synthetic-expiry", "ConnectionRequest", null, 600), CancellationToken.None);
+        await Task.Delay(50);
+        var staleAccept = pairingPromptAccept ?? throw new InvalidOperationException("Expiry prompt was not rendered.");
+        Thread.Sleep(650);
+        staleAccept.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        if ((await expiring).Accept) throw new InvalidOperationException("Expired prompt accepted a stale click.");
+        AssertPromptRestored();
+        if ((await ConfirmAsync(new("synthetic-already-expired", "ConnectionRequest", null, 0), CancellationToken.None)).Accept)
+            throw new InvalidOperationException("A zero-budget prompt was accepted.");
+        AssertPromptRestored();
         using var handoffCancel = new CancellationTokenSource();
         var simulatedOperation = new object();
         var handedOff = await BeginOnUiAsync(() => { handoffCancel.Cancel(); return simulatedOperation; }, handoffCancel.Token);
@@ -440,6 +568,6 @@ public sealed class MainWindow : Window, IPairingUi
         try { _ = await BeginOnUiAsync(() => { started = true; return new object(); }, handoffCancel.Token); throw new InvalidOperationException("Pre-cancel dispatcher callback executed."); }
         catch (OperationCanceledException) { }
         if (started) throw new InvalidOperationException("Pre-cancel dispatcher callback executed.");
-        Console.WriteLine("Synthetic pairing UI rendered; cancellation removed it; pre-cancel did not display a prompt. Dispatcher handoff retained a begun operation during cancellation and skipped pre-cancel. No radio tested.");
+        Console.WriteLine("Synthetic pairing UI countdown decreased without a new budget; expired stale clicks were rejected; cancellation removed the overlay; title/taskbar attention restored; pre-cancel and zero-budget prompts were not displayed. Dispatcher handoff retained a begun operation during cancellation and skipped pre-cancel. No radio tested.");
     }
 }

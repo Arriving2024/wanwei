@@ -749,7 +749,7 @@ class MainActivity : Activity() {
         stopButton = button(discovery, "停止扫描") { finishScan("cancelled_by_user", "你已取消扫描。") }
         stopButton.id = R.id.stop_scan
         peersText = addText(discovery, "尚未扫描。", 14f, muted, false, 12)
-        addText(discovery, "仅显示匿名候选；不会自动连接或配对。离开此页面会结束扫描。", 12f, muted, false, 12)
+        addText(discovery, "选择候选时显示系统名称，名称仅用于辨认，报告使用匿名标识；不会自动连接或配对。离开此页面会结束扫描。", 12f, muted, false, 12)
         val connection = card("03  本次 Direct 建链")
         pairingText = addText(connection, "先扫描并选择候选。电脑需打开“允许本次配对”。", 14f, Color.WHITE, false, 12)
         pairingText.id = R.id.pair_state
@@ -855,12 +855,34 @@ class MainActivity : Activity() {
             pairingText.text = "上一页面的实验仍在清理，请等待结束后重试。"
     }
 
+    private fun peerDisplayName(rawName: String?): String {
+        // Display only: never attach the system name to candidate or pairing reports.
+        val source = rawName.orEmpty()
+        var offset = 0
+        var count = 0
+        val display = buildString {
+            while (offset < source.length && count < 48) {
+                val codePoint = source.codePointAt(offset)
+                val unsafe = Character.isISOControl(codePoint) ||
+                    Character.getType(codePoint) == Character.FORMAT.toInt() ||
+                    codePoint == 0x2028 || codePoint == 0x2029
+                appendCodePoint(if (unsafe) 0x20 else codePoint)
+                offset += Character.charCount(codePoint)
+                count += 1
+            }
+        }.trim()
+        if (display.isBlank()) return "未提供"
+        return display + if (offset < source.length) "…" else ""
+    }
+
     private fun choosePeer() {
         if (scanning || stopping || pairing.busy || pairing.retryLocked) return
         val entries = livePeers.entries.toList()
         if (entries.isEmpty()) return
         AlertDialog.Builder(this).setTitle("选择本次连接候选")
-            .setItems(entries.mapIndexed { index, entry -> "候选 ${index + 1} · ${entry.key}\n${peerStatusLabel(peerStatus(entry.value.first.status))}" }.toTypedArray()) { _, index ->
+            .setItems(entries.mapIndexed { index, entry ->
+                "候选 ${index + 1} · ${entry.key}\n系统名称（未认证）：${peerDisplayName(entry.value.first.deviceName)}\n${peerStatusLabel(peerStatus(entry.value.first.status))}"
+            }.toTypedArray()) { _, index ->
                 selectedPeerToken = entries[index].key
                 selectPeerButton.text = "已选择候选 · ${selectedPeerToken}"
                 pairingText.text = "已选择匿名候选 ${selectedPeerToken}。尚未确认应用身份，请核对电脑处于本次配对模式。"
