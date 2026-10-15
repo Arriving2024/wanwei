@@ -43,6 +43,13 @@ public sealed record PairingTimingEvidence(int WaitForRequestLimitMs, int Negoti
     public string LimitsMeaning { get; } = "startup_and_cleanup_have_separate_bounds;_extra_requests_and_repeated_connected_events_never_extend_deadlines";
 }
 public sealed record DirectEndpointEvidence(string LocalAddress, string LocalPort, string RemoteAddress, string RemotePort);
+public sealed record OsAssociationEvidence(string QueryStatus, bool? OsAssociationObserved, bool DeviceAddressValidated,
+    bool LateReadPendingAtReturn, long ElapsedMs)
+{
+    public string Source { get; } = "current_request_DeviceInformation_Id_to_Aep_DeviceAddress_to_KindDevice_exact_address_lookup";
+    public string LateResultPolicy { get; } = "readonly_query_cancelled_and_late_result_ignored_never_changes_pairing_decision";
+    public string ApplicationIdentity { get; } = "not_authenticated_by_system_association";
+}
 public sealed record PairingSessionResult(string Outcome, bool StartAttempted, bool StartedObserved,
     bool NonLegacyConfigurationConfirmed, string FinalPublisherStatus, bool PublisherStopConfirmed,
     bool ResourceReleaseConfirmed, long DurationMs, int RequestsReceived, int RequestsReleased,
@@ -51,6 +58,9 @@ public sealed record PairingSessionResult(string Outcome, bool StartAttempted, b
     IReadOnlyList<DirectEndpointEvidence> EndpointPairs, IReadOnlyList<PairingEvent> Events, string? Error)
 {
     public PairingTimingEvidence? Timing { get; init; }
+    public bool? RequestIsPaired => AlreadyPaired;
+    public OsAssociationEvidence? OsAssociationCheck { get; init; }
+    public string EffectivePairingDecisionSource { get; init; } = "not_evaluated";
     public bool OperatorFixturePreauthorized { get; init; }
     public string AppPairingDecisionSource => OperatorFixturePreauthorized ? "explicit_cli_USB_fixed_fixture_lab" : "visible_UI_confirmation";
     public string ApplicationIdentity { get; } = "not_authenticated";
@@ -61,7 +71,7 @@ public sealed record PairingSessionResult(string Outcome, bool StartAttempted, b
 public sealed class LabReport
 {
     public string Schema { get; } = "wanwei.windows.probe/1";
-    public string AppVersion { get; } = "0.3.0";
+    public string AppVersion { get; } = "0.3.1";
     public string RunId { get; } = Guid.NewGuid().ToString("N");
     public DateTimeOffset StartedUtc { get; } = DateTimeOffset.UtcNow;
     public string Os { get; } = Environment.OSVersion.VersionString;

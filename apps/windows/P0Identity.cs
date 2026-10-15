@@ -50,7 +50,7 @@ internal sealed class P0Identity : IDisposable
     {
         Directory.CreateDirectory(directory);
         File.WriteAllText(Path.Combine(directory, "p0-public-identity.json"), JsonSerializer.Serialize(new {
-            schema = "wanwei.p0.public-identity/1", appVersion = "0.3.0", identity = Fingerprint,
+            schema = "wanwei.p0.public-identity/1", appVersion = "0.3.1", identity = Fingerprint,
             certificateDerBase64 = Convert.ToBase64String(Certificate.RawData), privateKeyExported = false,
             storageProtection = "Windows DPAPI CurrentUser", trust = "peer_full_fingerprint_requires_explicit_local_confirmation"
         }, ReportStore.Json), new UTF8Encoding(false));

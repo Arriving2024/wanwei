@@ -68,6 +68,7 @@ internal static class P0SelfTests
         check("P0 missing TLS peer certificate rejected", !P0Identity.ValidatePeer(null, pin));
         using var expired = TestCertificate(key, true);
         check("P0 expired certificate rejected", !P0Identity.ValidatePeer(expired, P0Identity.FingerprintOf(expired)));
+        AssociationPolicy(check, cert);
         using var key2 = RSA.Create(2048); using var peer = TestCertificate(key2);
         check("P0 TLS1.3 mutual pinned handshake loopback", TlsHandshake(cert, peer, false).GetAwaiter().GetResult());
         check("P0 TLS pin failure aborts handshake loopback", !TlsHandshake(cert, peer, true).GetAwaiter().GetResult());
@@ -83,6 +84,36 @@ internal static class P0SelfTests
         var deadline = new PairingDeadlines(60, 180); deadline.Start(0); deadline.TrySelectRequest(1); deadline.TryObserveConnection(2);
         check("P0 opt-in observation has fixed 180 second boundary", deadline.ObservationBudgetMs == 180_000 && deadline.MaximumRunMs == 285_000 && !deadline.TryObserveConnection(3));
         UsbLabPolicy(check);
+    }
+    private static void AssociationPolicy(Action<string, bool> check, X509Certificate2 certificate)
+    {
+        const string address = "12:34:56:78:9a:bc";
+        check("AEP query canonicalizes a selected device address", AepAssociationPolicy.NormalizeDeviceAddress("12-34-56-78-9A-BC") == address);
+        check("AEP query has one exact validated address selector", AepAssociationPolicy.Selector(address) == "System.Devices.Aep.DeviceAddress:=\"12:34:56:78:9a:bc\"");
+        string?[] invalid = [null, "", "000000000000", "00:00:00:00:00:00", "02:00:00:00:00:00", "ff:ff:ff:ff:ff:ff", "13:34:56:78:9a:bc", "12:34-56:78:9a:bc", address + "\n", address + "\r", address + "\"", address + "\\", "12:34:56:78:9a:gg", address + " OR System.Devices.Aep.IsPaired:=false"];
+        for (int i = 0; i < invalid.Length; i++) check("AEP malformed/default/injected address rejected " + i,
+            AepAssociationPolicy.NormalizeDeviceAddress(invalid[i]) is null && AepAssociationPolicy.Selector(invalid[i]) is null);
+        var matched = new OsAssociationEvidence("matched", true, true, false, 10);
+        check("AEP association can avoid duplicate pairing when request snapshot is false", AepAssociationPolicy.SkipFreshPairing(false, matched));
+        check("AEP lookup never rewrites request IsPaired snapshot", new PairingSessionResult("not_run", false, false, false, "not_created", true, true, 0, 0, 0, 0,
+            null, false, "ExistingSystemAssociationObserved", false, false, "not_created", [], [], null) { OsAssociationCheck = matched } is { RequestIsPaired: false, AlreadyPaired: false, OsAssociationCheck.OsAssociationObserved: true, ApplicationIdentity: "not_authenticated" });
+        foreach (string status in new[] { "not_observed", "device_address_unavailable", "invalid_device_address", "query_failed", "timed_out", "cancelled", "returned_address_mismatch" })
+            check("AEP unknown or failed lookup still requires fresh pairing " + status, !AepAssociationPolicy.SkipFreshPairing(false, new(status, status == "not_observed" ? false : null, status == "not_observed", status == "timed_out", 0)));
+        check("AEP unvalidated match cannot skip fresh pairing", !AepAssociationPolicy.SkipFreshPairing(false, matched with { DeviceAddressValidated = false }));
+        check("AEP pending or unknown result cannot skip fresh pairing", !AepAssociationPolicy.SkipFreshPairing(null, matched with { QueryStatus = "timed_out", OsAssociationObserved = null, LateReadPendingAtReturn = true }));
+        check("AEP original paired request preserves existing reconnection policy", AepAssociationPolicy.SkipFreshPairing(true, new("not_queried_request_already_paired", null, false, false, 0)));
+        check("AEP returned device address must agree when available", !AepAssociationPolicy.ReturnedDeviceMatches(address, true, "12:34:56:78:9a:bd") && AepAssociationPolicy.ReturnedDeviceMatches(address, true, "12-34-56-78-9A-BC"));
+        check("AEP returned address with wrong type is refused", !AepAssociationPolicy.ReturnedDeviceMatches(address, true, 123));
+        check("AEP exact-selector result tolerates unavailable secondary property", AepAssociationPolicy.ReturnedDeviceMatches(address, false, null));
+        check("AEP association never replaces application TLS pin verification", AepAssociationPolicy.SkipFreshPairing(false, matched) && !P0Identity.ValidatePeer(certificate, new string('0', 64)));
+        var zeroBudget = AepAssociationProbe.RunAsync("not-a-device-no-native-call", 0, CancellationToken.None).GetAwaiter().GetResult();
+        check("AEP exhausted negotiation budget touches no native query", zeroBudget.QueryStatus == "no_remaining_negotiation_budget" && !AepAssociationPolicy.SkipFreshPairing(false, zeroBudget));
+        using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
+        var cancelledQuery = AepAssociationProbe.RunAsync("not-a-device-no-native-call", 3000, cancelled.Token).GetAwaiter().GetResult();
+        check("AEP pre-cancelled lookup touches no native query or pairing decision", cancelledQuery.QueryStatus == "cancelled" && !AepAssociationPolicy.SkipFreshPairing(false, cancelledQuery));
+        var deadlines = new PairingDeadlines(60); deadlines.Start(0); deadlines.TrySelectRequest(59_000);
+        long originalCutoff = deadlines.DeadlineElapsedMs!.Value;
+        check("AEP lookup completion does not reset the original 45 second negotiation cutoff", !deadlines.TrySelectRequest(62_000) && !deadlines.Start(62_000) && deadlines.DeadlineElapsedMs == originalCutoff && originalCutoff == 104_000);
     }
     private static void UsbLabPolicy(Action<string, bool> check)
     {

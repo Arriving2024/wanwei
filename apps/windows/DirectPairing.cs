@@ -46,6 +46,8 @@ internal sealed class DirectPairing
     private int received, released, extraRejected;
     private string? peerToken, error;
     private bool? alreadyPaired;
+    private OsAssociationEvidence associationCheck = new("not_queried", null, false, false, 0);
+    private string pairingDecisionSource = "not_evaluated";
     private string outcome = "waiting_expired", systemPairingStatus = "not_attempted", connectionStatus = "not_created";
     private DirectEndpointEvidence[] endpoints = [];
 
@@ -204,7 +206,26 @@ internal sealed class DirectPairing
             lock (gate) if (!MayNegotiateLocked()) return;
             userAccepted = !ui.FixtureLabPreauthorized;
             Record("request", ui.FixtureLabPreauthorized ? "operator_fixture_preauthorized" : "user_accepted");
-            if (alreadyPaired == true) systemPairingStatus = "AlreadyPaired";
+            if (alreadyPaired != true)
+            {
+                int lookupBudget;
+                lock (gate)
+                {
+                    if (!MayNegotiateLocked()) return;
+                    lookupBudget = (int)Math.Min(3000, Math.Max(0, deadlines.DeadlineElapsedMs!.Value - clock.ElapsedMilliseconds));
+                }
+                associationCheck = await AepAssociationProbe.RunAsync(information.Id, lookupBudget, lifetime.Token).ConfigureAwait(false);
+                Record("os_association_lookup", associationCheck.QueryStatus);
+                lifetime.Token.ThrowIfCancellationRequested();
+                lock (gate) if (!MayNegotiateLocked()) return;
+            }
+            else associationCheck = new("not_queried_request_already_paired", null, false, false, 0);
+            pairingDecisionSource = AepAssociationPolicy.DecisionSource(alreadyPaired, associationCheck);
+            if (AepAssociationPolicy.SkipFreshPairing(alreadyPaired, associationCheck))
+            {
+                systemPairingStatus = alreadyPaired == true ? "AlreadyPaired" : "ExistingSystemAssociationObserved";
+                Record("pairing", "fresh_PairAsync_skipped_" + pairingDecisionSource);
+            }
             else
             {
                 if (information.Pairing is null) { error = "PAIRING_INTERFACE_MISSING"; outcome = "failed"; return; }
@@ -515,7 +536,8 @@ internal sealed class DirectPairing
             return new(outcome, startAttempted, startedObserved, configured, finalPublisher, stopConfirmed,
                 releaseConfirmed, clock.ElapsedMilliseconds, received, released, extraRejected, peerToken,
                 alreadyPaired, systemPairingStatus, userAccepted, connected, connectionStatus, endpoints, events.ToArray(), error)
-                { Timing = deadlines.Snapshot(), OperatorFixturePreauthorized = ui.FixtureLabPreauthorized };
+                { Timing = deadlines.Snapshot(), OperatorFixturePreauthorized = ui.FixtureLabPreauthorized,
+                    OsAssociationCheck = associationCheck, EffectivePairingDecisionSource = pairingDecisionSource };
         }
     }
 

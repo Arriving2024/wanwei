@@ -64,18 +64,26 @@ internal class P0TransferSession(context: Context, private val identity: P0Ident
         val initialPath = pathProvider()
         val executor = Executors.newSingleThreadExecutor()
         executor.execute {
-            val report = JSONObject().put("schema", "wanwei-android-transfer/0.1").put("appVersion", "0.3.0")
+            val report = JSONObject().put("schema", "wanwei-android-transfer/0.1").put("appVersion", "0.3.1")
                 .put("id", UUID.randomUUID().toString()).put("role", role).put("startedAtUtc", Instant.now().toString())
                 .put("fixture", P0Protocol.FIXTURE).put("expectedSizeBytes", P0Protocol.SIZE).put("expectedSha256", P0Protocol.HASH)
                 .put("localIdentity", localPin).put("confirmedPeerIdentity", peerPin)
                 .put("trustMethod", "user_confirmed_full_spki_fingerprint_out_of_band")
                 .put("applicationIdentityAuthenticated", false).put("tlsHandshakeCompleted", false)
                 .put("savedLocally", false).put("peerSaveConfirmed", false).put("bytesTransferred", 0)
+                .put("fileSyncSucceeded", false).put("renameSucceeded", false).put("directorySyncSucceeded", false)
                 .put("operatorFixturePreauthorized", operatorPreauthorized).put("userAcceptedOffer", false)
                 .put("preauthorizationSource", if (operatorPreauthorized) "debug_private_file_usb_lab" else JSONObject.NULL)
                 .put("sessionResumptionPolicy", "fresh_SSLContext_once_session_tickets_disabled_no_early_application_data")
             var partial: String? = null
             var fileDescriptor: FileDescriptor? = null
+            var partialIdentity: P0OwnedCommit.Identity? = null
+            var finalPath: String? = null
+            var finalIdentity: P0OwnedCommit.Identity? = null
+            var reservationFd: FileDescriptor? = null
+            var directoryFd: FileDescriptor? = null
+            var directoryPath: String? = null
+            var directoryIdentity: P0OwnedCommit.Identity? = null
             var taskId: String? = null
             var tls: SSLSocket? = null
             var authenticated = false
@@ -101,6 +109,9 @@ internal class P0TransferSession(context: Context, private val identity: P0Ident
                 changed(P0TransferUpdate(state, message, portValue, pending))
             }
             fun phase(milliseconds: Long) { phaseDeadline = now() + milliseconds }
+            fun storageStage(stage: String, operation: String) {
+                report.put("storageStage", stage).put("storageOperation", operation)
+            }
             fun read(remaining: Long = P0Protocol.SIZE, frameStarted: (Int) -> Unit = {}): P0Protocol.Frame {
                 ensureCurrent(initialPath)
                 return P0Protocol.read(tls!!.inputStream, remaining, frameStarted) { frameRemaining ->
@@ -260,16 +271,41 @@ internal class P0TransferSession(context: Context, private val identity: P0Ident
                         .put("operatorFixturePreauthorized", accepted == OfferConsent.OPERATOR_PREAUTHORIZED)
                         .put("preauthorizationSource", if (accepted == OfferConsent.OPERATOR_PREAUTHORIZED) "debug_private_file_usb_lab" else JSONObject.NULL)
                     val directory = File(app.filesDir, "p0-received")
-                    if (!directory.exists() && !directory.mkdir()) P0Protocol.fail("STORAGE_FAILED")
-                    if (!OsConstants.S_ISDIR(Os.lstat(directory.path).st_mode) || directory.canonicalFile.parentFile != app.filesDir.canonicalFile) P0Protocol.fail("STORAGE_FAILED")
+                    storageStage("prepare_directory", "mkdir")
+                    if (!directory.exists()) Os.mkdir(directory.path, 448)
+                    storageStage("verify_directory", "lstat")
+                    val initialDirectoryStat = Os.lstat(directory.path)
+                    if (!OsConstants.S_ISDIR(initialDirectoryStat.st_mode) || initialDirectoryStat.st_uid != Os.getuid() ||
+                        directory.canonicalFile.parentFile != app.filesDir.canonicalFile) P0Protocol.fail("STORAGE_FAILED")
+                    storageStage("hold_directory", "open")
+                    directoryFd = Os.open(directory.path, OsConstants.O_RDONLY or OsConstants.O_NOFOLLOW or OsConstants.O_CLOEXEC, 0)
+                    storageStage("protect_directory", "fchmod")
+                    Os.fchmod(directoryFd, 448)
+                    storageStage("verify_held_directory", "fstat")
+                    directoryIdentity = storageIdentity(Os.fstat(directoryFd))
+                    if (directoryIdentity!!.key != storageIdentity(initialDirectoryStat).key || !directoryIdentity!!.directory ||
+                        directoryIdentity!!.permissions != 448 || directoryIdentity!!.owner != Os.getuid()) P0Protocol.fail("STORAGE_FAILED")
+                    directoryPath = directory.path
                     if (directory.usableSpace < P0Protocol.SIZE + 65_536) {
                         control("REJECT", "transferId" to taskId, "reason" to "NO_SPACE")
                         report.put("outcome", "rejected").put("rejectReason", "NO_SPACE")
                         return@execute
                     }
                     val name = UUID.randomUUID().toString()
-                    partial = File(directory, "$name.partial").path
-                    fileDescriptor = Os.open(partial, OsConstants.O_CREAT or OsConstants.O_EXCL or OsConstants.O_WRONLY or OsConstants.O_NOFOLLOW or OsConstants.O_CLOEXEC, 384)
+                    val proposedPartial = File(directory, "$name.partial").path
+                    storageStage("create_partial_exclusive", "open")
+                    fileDescriptor = Os.open(proposedPartial, OsConstants.O_CREAT or OsConstants.O_EXCL or OsConstants.O_WRONLY or OsConstants.O_NOFOLLOW or OsConstants.O_CLOEXEC, 384)
+                    partial = proposedPartial
+                    storageStage("identify_partial", "fstat")
+                    partialIdentity = storageIdentity(Os.fstat(fileDescriptor))
+                    if (!partialIdentity!!.regular || partialIdentity!!.links != 1L || partialIdentity!!.owner != Os.getuid()) P0Protocol.fail("STORAGE_FAILED")
+                    val proposedFinal = File(directory, "$name.bin").path
+                    storageStage("reserve_final_exclusive", "open")
+                    reservationFd = Os.open(proposedFinal, OsConstants.O_CREAT or OsConstants.O_EXCL or OsConstants.O_WRONLY or OsConstants.O_NOFOLLOW or OsConstants.O_CLOEXEC, 384)
+                    finalPath = proposedFinal
+                    storageStage("identify_final_reservation", "fstat")
+                    finalIdentity = storageIdentity(Os.fstat(reservationFd))
+                    if (!finalIdentity!!.regular || finalIdentity!!.links != 1L || finalIdentity!!.owner != Os.getuid() || finalIdentity!!.size != 0L) P0Protocol.fail("STORAGE_FAILED")
                     if (firstData.isCompletedExceptionally) firstData.get()
                     acceptWriteStarted.set(true)
                     control("ACCEPT", "transferId" to taskId)
@@ -282,6 +318,7 @@ internal class P0TransferSession(context: Context, private val identity: P0Ident
                         var offset = 0
                         while (offset < frame.payload.size) {
                             ensureCurrent(initialPath)
+                            storageStage("write_partial", "write")
                             val written = Os.write(fileDescriptor, frame.payload, offset, frame.payload.size - offset)
                             if (written <= 0) P0Protocol.fail("STORAGE_FAILED")
                             offset += written
@@ -293,19 +330,30 @@ internal class P0TransferSession(context: Context, private val identity: P0Ident
                     firstReader.join(500)
                     report.put("sha256", hash)
                     if (hash != P0Protocol.HASH) P0Protocol.fail("HASH_MISMATCH")
-                    Os.fsync(fileDescriptor); Os.close(fileDescriptor); fileDescriptor = null
+                    storageStage("sync_partial_contents", "fsync")
+                    Os.fsync(fileDescriptor)
+                    report.put("fileSyncSucceeded", true)
                     ensureCurrent(initialPath)
-                    val finalFile = File(directory, "$name.bin")
-                    // link() atomically creates a new name without overwriting any existing target.
-                    Os.link(partial, finalFile.path); committed = true
-                    report.put("savedLocally", true).put("savedBasename", finalFile.name)
-                    Os.remove(partial); partial = null
-                    val dirFd = Os.open(directory.path, OsConstants.O_RDONLY or OsConstants.O_NOFOLLOW, 0)
-                    try {
-                        if (!OsConstants.S_ISDIR(Os.fstat(dirFd).st_mode)) P0Protocol.fail("STORAGE_FAILED")
-                        Os.fsync(dirFd)
-                    } finally { Os.close(dirFd) }
-                    report.put("fileSyncSucceeded", true).put("directorySyncSucceeded", true)
+                    storageStage("validate_owned_commit_paths", "lstat")
+                    P0OwnedCommit.commit(directory.path, partial!!, finalPath!!, directoryIdentity!!,
+                        partialIdentity!!, finalIdentity!!, observe = { storageIdentity(Os.lstat(it)) },
+                        rename = { from, to ->
+                            storageStage("rename_into_own_reservation", "rename")
+                            Os.rename(from, to)
+                        })
+                    // Keep both FDs open through rename, so the reserved inode cannot be reused.
+                    finalIdentity = partialIdentity; partial = null
+                    report.put("renameSucceeded", true).put("commitMethod", "rename_into_exclusive_task_owned_reservation")
+                    storageStage("sync_committed_directory", "fsync")
+                    Os.fsync(directoryFd)
+                    report.put("directorySyncSucceeded", true)
+                    committed = true
+                    report.put("savedLocally", true).put("savedBasename", File(finalPath!!).name)
+                    storageStage("close_partial_descriptor", "close")
+                    Os.close(fileDescriptor); fileDescriptor = null
+                    storageStage("close_old_reservation_descriptor", "close")
+                    Os.close(reservationFd); reservationFd = null
+                    storageStage("commit_complete", "none")
                     control("COMPLETE", "transferId" to taskId, "sizeBytes" to P0Protocol.SIZE, "sha256" to hash)
                     report.put("completeSent", true).put("outcome", "saved_locally")
                     publish("complete", "本机已保存 1 MiB 测试文件，哈希校验通过。")
@@ -322,6 +370,10 @@ internal class P0TransferSession(context: Context, private val identity: P0Ident
                 }
                 report.put("outcome", if (committed) "saved_locally_peer_confirmation_unknown" else "failed")
                     .put("errorCode", code).put("errorType", unwrapped.javaClass.simpleName)
+                if (unwrapped is android.system.ErrnoException) report
+                    .put("storageErrnoFunction", report.optString("storageOperation", "unknown"))
+                    .put("storageErrnoNumber", unwrapped.errno)
+                    .put("storageFailureStage", report.optString("storageStage", "unknown"))
                 phaseDeadline = minOf(phaseDeadline, now() + 1_000)
                 if (authenticated && unwrapped !is P0Protocol.PeerFailure && tls?.isClosed == false && code in P0Protocol.errors) runCatching {
                     P0Protocol.write(tls!!.outputStream, 1, P0Protocol.json("ERROR", "transferId" to taskId, "code" to code))
@@ -330,8 +382,25 @@ internal class P0TransferSession(context: Context, private val identity: P0Ident
             } finally {
                 watchdog.shutdownNow()
                 offerDecision.getAndSet(null)?.complete(OfferConsent.USER_DECLINED)
+                if (!committed) {
+                    val ownedDirectoryStillPresent = runCatching {
+                        directoryPath != null && directoryIdentity != null &&
+                            P0OwnedCommit.ownsDirectory(directoryIdentity!!, storageIdentity(Os.lstat(directoryPath!!)))
+                    }.getOrDefault(false)
+                    fun removeOwned(path: String?, expected: P0OwnedCommit.Identity?) {
+                        if (path == null) return
+                        if (!ownedDirectoryStillPresent || expected == null) { report.put("storageCleanupNeedsReview", true); return }
+                        runCatching {
+                            if (P0OwnedCommit.ownsFile(expected, storageIdentity(Os.lstat(path)))) Os.remove(path)
+                            else report.put("foreignStoragePathPreserved", true)
+                        }.onFailure { report.put("storageCleanupNeedsReview", true) }
+                    }
+                    removeOwned(partial, partialIdentity)
+                    removeOwned(finalPath, finalIdentity)
+                }
                 runCatching { fileDescriptor?.let(Os::close) }
-                partial?.let { runCatching { Os.remove(it) } }
+                runCatching { reservationFd?.let(Os::close) }
+                runCatching { directoryFd?.let(Os::close) }
                 runCatching { tls?.session?.invalidate() }
                 val previousSocket = socket.getAndSet(null)
                 val previousListener = listener.getAndSet(null)
@@ -368,6 +437,9 @@ internal class P0TransferSession(context: Context, private val identity: P0Ident
         } catch (error: Exception) { report.put("reportWriteFailed", true).put("reportWriteErrorType", error.javaClass.simpleName) }
     }
     companion object {
+        private fun storageIdentity(stat: android.system.StructStat) = P0OwnedCommit.Identity(
+            "${stat.st_dev}:${stat.st_ino}", stat.st_uid, OsConstants.S_ISREG(stat.st_mode),
+            OsConstants.S_ISDIR(stat.st_mode), stat.st_mode and 511, stat.st_nlink, stat.st_size)
         private fun now() = System.nanoTime() / 1_000_000
         private fun ipv4(value: String): Inet4Address {
             // Never resolve hostnames or accidentally select the ordinary network.

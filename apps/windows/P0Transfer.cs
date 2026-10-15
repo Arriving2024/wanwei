@@ -36,7 +36,7 @@ internal sealed record P0Path(IPAddress Local, IPAddress Remote, string Interfac
 internal sealed class P0TransferStatus
 {
     public string Schema { get; } = "wanwei.p0.transfer/1";
-    public string AppVersion { get; } = "0.3.0";
+    public string AppVersion { get; } = "0.3.1";
     public string RunId { get; } = Guid.NewGuid().ToString("N");
     public DateTimeOffset StartedUtc { get; } = DateTimeOffset.UtcNow;
     public string Role { get; set; } = "not_started";

@@ -16,6 +16,9 @@ $wwP0Directions = [Collections.Generic.List[object]]::new()
 $wwP0Output = $null
 $wwP0Private = $null
 $wwP0ControlAuthorized = $false
+$wwP0LastWindows = $null
+$wwP0LastAndroid = $null
+$wwP0FailureDiagnostics = $null
 
 function Get-WwP0Field {
     param($Value, [string]$Name)
@@ -71,7 +74,41 @@ function Convert-WwP0SafeReport {
             $copy.PSObject.Properties.Remove($property.Name)
         }
     }
+    if ($copy.PSObject.Properties['errorCode']) { $copy.errorCode = Get-WwP0AllowedError -Value $copy.errorCode }
+    if ($copy.PSObject.Properties['errorType']) { $copy.errorType = Get-WwP0AllowedError -Value $copy.errorType -ExceptionType }
     return $copy
+}
+function Get-WwP0AllowedError {
+    param($Value, [switch]$ExceptionType)
+    if ($null -eq $Value -or [string]$Value -eq '') { return $null }
+    if ($ExceptionType) {
+        $allowed = @('SocketException','SocketTimeoutException','SSLHandshakeException','SSLException','CertificateException','CertificateExpiredException','CertificateNotYetValidException','Failure','PeerFailure','ErrnoException','TimeoutException','ExecutionException','IOException','IllegalStateException','IllegalArgumentException','FileNotFoundException','SecurityException','KeyStoreException','InvalidKeyException')
+        if ([string]$Value -cin $allowed) { return [string]$Value }
+        return 'OTHER_EXCEPTION_TYPE'
+    }
+    $code = [string]$Value
+    $plain = if ($code.StartsWith('PEER_', [StringComparison]::Ordinal)) { $code.Substring(5) } else { $code }
+    $allowed = @('UNSUPPORTED_VERSION','UNSUPPORTED_SERVICE','INVALID_MESSAGE','INVALID_FRAME','UNEXPECTED_MESSAGE','IDENTITY_MISMATCH','SIZE_MISMATCH','HASH_MISMATCH','STORAGE_FAILED','CANCELLED','TIMEOUT','DIRECT_PATH_UNVERIFIED','TLS_AUTHENTICATION_FAILED','CONNECTION_FAILED','STORAGE_CLEANUP_UNCONFIRMED')
+    if ($plain -cin $allowed) { return $code }
+    return 'UNCLASSIFIED_ERROR_CODE'
+}
+function Save-WwP0FailureReports {
+    param($Windows, $Android)
+    if (-not $wwP0Output) { return }
+    $directory = Join-Path $wwP0Output 'failure-before-cancel'
+    Assert-WwP0SafeDirectory $directory
+    [void][IO.Directory]::CreateDirectory($directory)
+    if ($null -ne $Windows) { Write-WwP0SafeJson -Path (Join-Path $directory 'windows-transfer.json') -Value (Convert-WwP0SafeReport $Windows) }
+    if ($null -ne $Android) { Write-WwP0SafeJson -Path (Join-Path $directory 'android-transfer.json') -Value (Convert-WwP0SafeReport $Android) }
+    $script:wwP0FailureDiagnostics = [pscustomobject]@{
+        CapturedUtc=[datetimeoffset]::UtcNow.ToString('O');BeforeHarnessCancellation=$true;RelativeDirectory='failure-before-cancel';
+        WindowsReportAvailable=($null -ne $Windows);WindowsState=(Get-WwP0Field $Windows 'state');
+        WindowsErrorCode=(Get-WwP0AllowedError -Value (Get-WwP0Field $Windows 'errorCode'));
+        AndroidReportAvailable=($null -ne $Android);AndroidState=(Get-WwP0Field $Android 'state');
+        AndroidErrorCode=(Get-WwP0AllowedError -Value (Get-WwP0Field $Android 'errorCode'));
+        AndroidErrorType=(Get-WwP0AllowedError -Value (Get-WwP0Field $Android 'errorType') -ExceptionType)
+    }
+    Write-WwP0SafeJson -Path (Join-Path $directory 'diagnostics.json') -Value $wwP0FailureDiagnostics
 }
 function Save-WwP0Direction {
     param([string]$Name, $Windows, $Android)
@@ -83,24 +120,31 @@ function Save-WwP0Direction {
 }
 function Wait-WwP0Pair {
     param([string]$WindowsRole, [string]$AndroidRole, [string]$ExpectedWindowsId,
-        [string]$PreviousWindowsId, [string]$PreviousAndroidId, [datetimeoffset]$AfterUtc)
+        [datetimeoffset]$ExpectedWindowsStartedUtc = [datetimeoffset]::MinValue,
+        [string]$ExpectedAndroidId, [string]$PreviousWindowsId, [string]$PreviousAndroidId, [datetimeoffset]$AfterUtc)
     $clock = [Diagnostics.Stopwatch]::StartNew()
     while ($clock.ElapsedMilliseconds -lt 30000) {
         $windows = Read-WwP0LocalJson -Path (Join-Path $wwP0Private.reportDirectory 'latest-transfer.json') -AllowMissing
         $remaining = 30000 - $clock.ElapsedMilliseconds
         if ($remaining -le 0) { break }
         $android = Read-WwP0PhoneJson -Kind transfer -TimeoutMs ([int][Math]::Min(1500, $remaining)) -AllowMissing
+        if ($null -ne $windows) { $script:wwP0LastWindows = $windows }
+        if ($null -ne $android) { $script:wwP0LastAndroid = $android }
         $winId = [string](Get-WwP0Field $windows 'runId'); $androidId = [string](Get-WwP0Field $android 'id')
         $winCurrent = $winId -and (($ExpectedWindowsId -and $winId -eq $ExpectedWindowsId) -or (-not $ExpectedWindowsId -and $winId -ne $PreviousWindowsId)) -and (Get-WwP0Field $windows 'role') -eq $WindowsRole
-        $androidCurrent = $androidId -and $androidId -ne $PreviousAndroidId -and (Get-WwP0Field $android 'role') -eq $AndroidRole
-        if ($winCurrent -and (Get-WwP0Field $windows 'state') -in @('failed','cancelled','rejected','storage_rejected','cleanup_unconfirmed')) { throw 'P0_CHECK_WINDOWS_TRANSFER_FAILED' }
-        if ($androidCurrent -and (Get-WwP0Field $android 'state') -eq 'finished' -and (Get-WwP0Field $android 'outcome') -notin @('saved_locally','peer_saved_confirmed')) { throw 'P0_CHECK_ANDROID_TRANSFER_FAILED' }
+        $androidCurrent = $androidId -and (($ExpectedAndroidId -and $androidId -eq $ExpectedAndroidId) -or (-not $ExpectedAndroidId -and $androidId -ne $PreviousAndroidId)) -and (Get-WwP0Field $android 'role') -eq $AndroidRole
+        if ($winCurrent -and (Get-WwP0Field $windows 'state') -in @('failed','cancelled','rejected','storage_rejected','cleanup_unconfirmed')) { Save-WwP0FailureReports -Windows $windows -Android $android; throw 'P0_CHECK_WINDOWS_TRANSFER_FAILED' }
+        if ($androidCurrent -and (Get-WwP0Field $android 'state') -eq 'finished' -and (Get-WwP0Field $android 'outcome') -notin @('saved_locally','peer_saved_confirmed')) { Save-WwP0FailureReports -Windows $windows -Android $android; throw 'P0_CHECK_ANDROID_TRANSFER_FAILED' }
         if ($winCurrent -and $androidCurrent -and (Get-WwP0Field $windows 'state') -eq 'complete' -and (Get-WwP0Field $windows 'cleanupFinished') -eq $true -and (Get-WwP0Field $android 'state') -eq 'finished') {
             Assert-WwP0 ([datetimeoffset]$android.startedAtUtc -ge $AfterUtc.AddSeconds(-10)) 'ANDROID_FRESH_TIMESTAMP'
+            if ($ExpectedWindowsId) { Assert-WwP0 ([datetimeoffset]$windows.startedUtc -eq $ExpectedWindowsStartedUtc) 'WINDOWS_EXPECTED_RECEIVER_TIMESTAMP' }
+            else { Assert-WwP0 ([datetimeoffset]$windows.startedUtc -ge $AfterUtc.AddSeconds(-2)) 'WINDOWS_FRESH_SENDER_TIMESTAMP' }
+            Assert-WwP0 ([datetimeoffset]$windows.startedUtc -le [datetimeoffset]::UtcNow.AddSeconds(5)) 'WINDOWS_TIMESTAMP_NOT_FUTURE'
             return [pscustomobject]@{Windows=$windows;Android=$android}
         }
         Start-Sleep -Milliseconds 200
     }
+    Save-WwP0FailureReports -Windows $wwP0LastWindows -Android $wwP0LastAndroid
     throw 'P0_CHECK_TRANSFER_WAIT_30S_TIMEOUT'
 }
 function Test-WwP0Direction {
@@ -179,10 +223,18 @@ try {
     Assert-WwP0 ($firstWin.schema -eq 'wanwei.p0.transfer/1' -and $firstWin.role -eq 'receiver' -and $firstWin.state -eq 'listening' -and $firstWin.cleanupFinished -eq $false -and $firstWin.socketClosed -eq $false -and $firstWin.bytes -eq 0 -and $firstWin.nativeLocalAddress -eq $firstWin.socketLocalAddress -and $firstWin.socketLocalPort -ge 1 -and $firstWin.socketLocalPort -le 65535) 'FRESH_WINDOWS_LISTENER'
     Assert-WwP0 (([datetimeoffset]::UtcNow - [datetimeoffset]$firstWin.startedUtc).TotalSeconds -ge -5 -and ([datetimeoffset]::UtcNow - [datetimeoffset]$firstWin.startedUtc).TotalSeconds -lt 25) 'LISTENER_WITHIN_TCP_WAIT_BUDGET'
     $previousAndroid = Read-WwP0PhoneJson -Kind transfer -AllowMissing
+    $wwP0LastAndroid = $previousAndroid
+    # Re-read after the USB metadata query. The TCP listener may have expired
+    # while reading that report; never send to a stale port just because its
+    # earlier snapshot was within the 30 second establishment budget.
+    $freshWin = Read-WwP0LocalJson -Path (Join-Path $wwP0Private.reportDirectory 'latest-transfer.json')
+    $wwP0LastWindows = $freshWin
+    Assert-WwP0 ($freshWin.runId -ceq $firstWin.runId -and $freshWin.startedUtc -ceq $firstWin.startedUtc -and $freshWin.state -eq 'listening' -and $freshWin.cleanupFinished -eq $false -and $freshWin.socketLocalAddress -eq $firstWin.socketLocalAddress -and $freshWin.socketLocalPort -eq $firstWin.socketLocalPort) 'LISTENER_STILL_ACTIVE_BEFORE_SEND'
+    Assert-WwP0 (([datetimeoffset]::UtcNow - [datetimeoffset]$freshWin.startedUtc).TotalSeconds -lt 25) 'LISTENER_BUDGET_BEFORE_SEND'
     $wwP0Stage = 'android_to_windows_send'
     $firstAfter = [datetimeoffset]::UtcNow
     $null = Send-P0AndroidLabCommand -SessionNonce $wwP0Private.sessionNonce -Action send -PeerAddress $firstWin.socketLocalAddress -Port ([int]$firstWin.socketLocalPort)
-    $first = Wait-WwP0Pair -WindowsRole receiver -AndroidRole sender -ExpectedWindowsId $firstWin.runId -PreviousAndroidId ([string](Get-WwP0Field $previousAndroid 'id')) -AfterUtc $firstAfter
+    $first = Wait-WwP0Pair -WindowsRole receiver -AndroidRole sender -ExpectedWindowsId $firstWin.runId -ExpectedWindowsStartedUtc ([datetimeoffset]$firstWin.startedUtc) -PreviousAndroidId ([string](Get-WwP0Field $previousAndroid 'id')) -AfterUtc $firstAfter
     Save-WwP0Direction -Name 'android-to-windows' -Windows $first.Windows -Android $first.Android
     $wwP0Stage = 'android_to_windows_validation'
     $wwP0Directions.Add((Test-WwP0Direction -Direction 'android-to-windows' -Windows $first.Windows -Android $first.Android))
@@ -194,13 +246,14 @@ try {
         $remaining = 10000 - $listenClock.ElapsedMilliseconds
         if ($remaining -le 0) { break }
         $candidate = Read-WwP0PhoneJson -Kind transfer -TimeoutMs ([int][Math]::Min(1500, $remaining)) -AllowMissing
-        if ($null -ne $candidate -and $candidate.id -ne $first.Android.id -and $candidate.role -eq 'receiver' -and $candidate.state -eq 'listening') { $phoneListener = $candidate; break }
+        if ($null -ne $candidate) { $wwP0LastAndroid = $candidate }
+        if ($null -ne $candidate -and $candidate.id -ne $first.Android.id -and $candidate.role -eq 'receiver' -and $candidate.state -eq 'listening' -and [datetimeoffset]$candidate.startedAtUtc -ge $secondAfter.AddSeconds(-10)) { $phoneListener = $candidate; break }
         Start-Sleep -Milliseconds 150
     }
     Assert-WwP0 ($null -ne $phoneListener -and $phoneListener.listenerPort -ge 1 -and $phoneListener.listenerPort -le 65535 -and $phoneListener.listenerAddress -eq $first.Windows.nativeRemoteAddress) 'FRESH_ANDROID_LISTENER'
     $wwP0Stage = 'windows_to_android_send'
     $null = Send-P0WindowsLabCommand -ReportDirectory $wwP0Private.reportDirectory -SessionNonce $wwP0Private.sessionNonce -Action send -Port ([int]$phoneListener.listenerPort)
-    $second = Wait-WwP0Pair -WindowsRole sender -AndroidRole receiver -PreviousWindowsId $first.Windows.runId -PreviousAndroidId $first.Android.id -AfterUtc $secondAfter
+    $second = Wait-WwP0Pair -WindowsRole sender -AndroidRole receiver -ExpectedAndroidId $phoneListener.id -PreviousWindowsId $first.Windows.runId -PreviousAndroidId $first.Android.id -AfterUtc $secondAfter
     Save-WwP0Direction -Name 'windows-to-android' -Windows $second.Windows -Android $second.Android
     $wwP0Stage = 'windows_to_android_validation'
     $wwP0Directions.Add((Test-WwP0Direction -Direction 'windows-to-android' -Windows $second.Windows -Android $second.Android))
@@ -214,9 +267,13 @@ try {
         while ($cleanupClock.ElapsedMilliseconds -lt 30000) {
             $files = Get-ChildItem -LiteralPath $wwP0Private.reportDirectory -Filter 'windows-*.json' -File | Where-Object { $_.LastWriteTimeUtc -ge $endAfter.UtcDateTime } | Sort-Object LastWriteTimeUtc -Descending
             if ($files) {
-                $candidate = Read-WwP0LocalJson -Path $files[0].FullName -AllowMissing
+                # Native reports may contain up to 600 one-second AP samples;
+                # retain a separate bounded cap above the small transport JSON.
+                $candidate = Read-WwP0LocalJson -Path $files[0].FullName -MaximumBytes 2097152 -AllowMissing
                 $pairing = Get-WwP0Field $candidate 'pairingSession'
-                if ($pairing -and (Get-WwP0Field $pairing 'operatorFixturePreauthorized') -eq $true -and (Get-WwP0Field $pairing 'publisherStopConfirmed') -eq $true -and (Get-WwP0Field $pairing 'resourceReleaseConfirmed') -eq $true) { $native = $candidate; $nativeReleased = $true; break }
+                $matchingEndpoints = @()
+                if ($pairing) { $matchingEndpoints = @((Get-WwP0Field $pairing 'endpointPairs') | Where-Object { $null -ne $_ -and $_.localAddress -eq $first.Windows.nativeLocalAddress -and $_.remoteAddress -eq $first.Windows.nativeRemoteAddress }) }
+                if ($pairing -and $matchingEndpoints.Count -gt 0 -and (Get-WwP0Field $pairing 'connectedObserved') -eq $true -and (Get-WwP0Field $pairing 'operatorFixturePreauthorized') -eq $true -and (Get-WwP0Field $pairing 'userAcceptedRequest') -eq $false -and (Get-WwP0Field $pairing 'publisherStopConfirmed') -eq $true -and (Get-WwP0Field $pairing 'resourceReleaseConfirmed') -eq $true -and [datetimeoffset]$candidate.startedUtc -le [datetimeoffset]$first.Windows.startedUtc) { $native = $candidate; $nativeReleased = $true; break }
             }
             Start-Sleep -Milliseconds 200
         }
@@ -232,6 +289,9 @@ try {
     $summary
 } catch {
     $checkCode = if ($_.Exception.Message -cmatch '^P0_CHECK_[A-Z0-9_]+\z') { $_.Exception.Message } else { 'P0_CHECK_OPERATION_OR_REPORT_FAILED' }
+    if ($wwP0Output -and $null -eq $wwP0FailureDiagnostics) {
+        try { Save-WwP0FailureReports -Windows $wwP0LastWindows -Android $wwP0LastAndroid } catch { }
+    }
     # Cancel only the app's current fixture transport. Leave native/group/UI
     # teardown to the operator on a failed experiment; do not continue direction 2.
     if ($wwP0ControlAuthorized) {
@@ -239,7 +299,7 @@ try {
         try { $null = Send-P0WindowsLabCommand -ReportDirectory $wwP0Private.reportDirectory -SessionNonce $wwP0Private.sessionNonce -Action cancel } catch { }
     }
     if ($wwP0Output) {
-        $failure = [pscustomobject]@{Schema='wanwei.p0.usb-transport-acceptance/1';Passed=$false;Stage=$wwP0Stage;FailureCode=$checkCode;FinishedUtc=[datetimeoffset]::UtcNow.ToString('O');Directions=@($wwP0Directions);UsbCopiedFixtureBytes=$false;ApAndInternetContinuity='not_evaluated_here'}
+        $failure = [pscustomobject]@{Schema='wanwei.p0.usb-transport-acceptance/1';Passed=$false;Stage=$wwP0Stage;FailureCode=$checkCode;FailureDiagnostics=$wwP0FailureDiagnostics;FinishedUtc=[datetimeoffset]::UtcNow.ToString('O');Directions=@($wwP0Directions);UsbCopiedFixtureBytes=$false;ApAndInternetContinuity='not_evaluated_here'}
         Write-WwP0SafeJson -Path (Join-Path $wwP0Output 'transfer-verification.json') -Value $failure
     }
     throw ('P0 USB transport verification failed at ' + $wwP0Stage + ': ' + $checkCode + '. See the local sanitized evidence.')

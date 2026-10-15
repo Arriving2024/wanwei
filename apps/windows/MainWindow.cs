@@ -54,7 +54,7 @@ public sealed class MainWindow : Window, IPairingUi
         Content = root;
 
         var header = new DockPanel { Margin = new Thickness(0, 0, 0, 24) };
-        var tag = Text("WINDOWS  /  P0.3.0", 12, "#84B9FF");
+        var tag = Text("WINDOWS  /  P0.3.1", 12, "#84B9FF");
         tag.VerticalAlignment = VerticalAlignment.Center;
         DockPanel.SetDock(tag, Dock.Right); header.Children.Add(tag);
         header.Children.Add(Text("万维计划", 24, "#FFFFFF"));
@@ -214,6 +214,8 @@ public sealed class MainWindow : Window, IPairingUi
             };
             result.Text = pairing.ConnectedObserved ? "系统曾报告 Direct 已连接 · 互传实验结果见独立报告" : "尚未观察到实际 Direct 连接";
             activity.AppendText($"\n配对模式：{pairing.Outcome}\n系统配对结果：{pairing.SystemPairingStatus}\n连接最终样本：{pairing.FinalConnectionStatus}\n");
+            if (pairing.OsAssociationCheck is { } association)
+                activity.AppendText($"系统关联查询：{association.QueryStatus}；本次连接处理：{pairing.EffectivePairingDecisionSource}。系统关联不代替应用身份认证。\n");
             activity.AppendText($"请求：{pairing.RequestsReceived}；已释放：{pairing.RequestsReleased}；额外拒绝：{pairing.ExtraRequestsRejected}\n");
             if (pairing.Timing is { } timing)
                 activity.AppendText($"计时结束原因：{timing.EndReason}；等待、协商、观察分别计时。\n");

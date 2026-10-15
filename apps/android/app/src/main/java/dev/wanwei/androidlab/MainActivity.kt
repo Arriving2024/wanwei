@@ -636,7 +636,7 @@ class MainActivity : Activity() {
     }
 
     private fun makeReport(kind: String): String = JSONObject()
-        .put("schema", "wanwei.android.p0.v1").put("appVersion", "0.3.0")
+        .put("schema", "wanwei.android.p0.v1").put("appVersion", "0.3.1")
         .put("kind", kind).put("generatedAtUtc", Instant.now().toString())
         .put("runId", runId).put("runStartedAtUtc", startedAt).put("capabilityProbe", probe)
         .put("scan", currentScan ?: JSONObject.NULL)
@@ -784,7 +784,7 @@ class MainActivity : Activity() {
         reportText = addText(evidence, "准备本机报告……", 13f, muted, false, 12)
         exportButton = button(evidence, "导出 JSON 报告") { exportReport() }
         exportButton.id = R.id.export_report
-        addText(evidence, "当前版本：0.3.0。P0 只传合成的 1 MiB 测试文件。公钥和监听端口需线下交换，每次收文件必须明确接受；真机互通结果以两端报告为准。", 13f, Color.rgb(242, 205, 142), false, 14)
+        addText(evidence, "当前版本：0.3.1。P0 只传合成的 1 MiB 测试文件。公钥和监听端口需线下交换，每次收文件必须明确接受；真机互通结果以两端报告为准。", 13f, Color.rgb(242, 205, 142), false, 14)
         button(content, "系统定位设置") { openSettings(Settings.ACTION_LOCATION_SOURCE_SETTINGS) }
         button(content, "应用权限设置") {
             try {
@@ -902,7 +902,7 @@ class MainActivity : Activity() {
         worker.execute {
             try {
                 val prepared = P0Identity()
-                val report = JSONObject().put("schema", "wanwei-public-identity/0.1").put("appVersion", "0.3.0")
+                val report = JSONObject().put("schema", "wanwei-public-identity/0.1").put("appVersion", "0.3.1")
                     .put("identity", prepared.fingerprint).put("identityEncoding", "sha256_der_subject_public_key_info_lowercase_hex")
                     .put("keyStore", "AndroidKeyStore_non_exportable_private_key")
                     .put("certificateDerBase64", android.util.Base64.encodeToString(prepared.certificate.encoded, android.util.Base64.NO_WRAP))

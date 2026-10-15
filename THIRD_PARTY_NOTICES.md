@@ -1,8 +1,8 @@
 # 第三方参考源码声明
 
-更新：2026-10-14。
+更新：2026-10-15。
 
-本文记录随项目保存的第三方参考文件与构建入口。**Windows 自 v0.2.0 起，已改造采用 Microsoft WiFiDirect 示例的广播、Custom pairing 设置与 UI 线程连接流程；当前 v0.2.2 延续此范围。** Android AOSP 示例仍作流程参考，原 Java 文件未直接编译引入。完整许可证与原始源文件一并存放。项目原创源码按根目录 Apache-2.0 许可分发，不替代第三方材料原许可。
+本文记录随项目保存的第三方参考文件与构建入口。**Windows 自 v0.2.0 起，已改造采用 Microsoft WiFiDirect 示例的广播、Custom pairing 设置与 UI 线程连接流程；v0.3.1 新增改造采用同一示例的系统关联查询。** Android AOSP 示例仍作流程参考，原 Java 文件未直接编译引入。完整许可证与原始源文件一并存放。项目原创源码按根目录 Apache-2.0 许可分发，不替代第三方材料原许可。
 
 本文不是构建工具、SDK 或系统组件的完整依赖清单。Windows 便携包另附实际运行时版本、来源、哈希和许可，见包内 `DEPENDENCIES.json` 与 `licenses/`。Android Debug APK 和后续正式分发仍需按对应构建产物核对依赖。
 
@@ -20,6 +20,7 @@
 - 本项目改造：用户逐次确认、PIN 交互、单次请求接纳、deferral 收尾、阶段超时、取消、晚到结果清理、原 AP 匿名采样及资源释放未确认时锁定重试。v0.2.2 分别限制等待首请求 60 秒、协商 45 秒和已连接观察 20 秒；Legacy 和自主组主均关闭，不删除已有 OS 配对、不修改默认路由。
 - 未采用原示例中的热点模式和 socket、文件或消息收发代码。`Scenario2_Connector.xaml.cs` 继续作为连接与端点 API 参考，未直接编译引入。
 - v0.2.1 新增的 GUI 每轮报告自动保存属于本项目实现，本次没有新增第三方运行时源码。
+- v0.3.1 新增采用范围：参考 `Scenario1_Advertiser.xaml.cs` 的 `IsAepPairedAsync`，从当前请求读取 AEP 地址并查询同地址的系统设备关联，改造位置为 [`apps/windows/AepAssociationProbe.cs`](apps/windows/AepAssociationProbe.cs) 及 [`apps/windows/DirectPairing.cs`](apps/windows/DirectPairing.cs)。增加严格地址校验、共享三秒只读查询上限、原协商预算内的取消与晚到结果清理；查询未知不跳过新配对，不删除既有配对，也不将系统关联当作应用身份认证。
 
 Microsoft 版权与 MIT 归属由本声明、改造文件中的来源说明及随附许可证共同记录。分发包含该代码的产物时须随附 MIT 许可证全文；后续采用范围变化继续更新此表。
 
