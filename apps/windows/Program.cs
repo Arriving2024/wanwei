@@ -37,7 +37,13 @@ internal static class Program
                 app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
                 app.Startup += async (_, _) => {
                     try {
-                        if (options.Mode == "ui-pairing-prompt-smoke") await window.PromptSmokeAsync(options.PreviewPath!);
+                        if (options.Mode == "ui-pairing-prompt-smoke")
+                        {
+                            // Unlike offscreen render-preview, this no-radio
+                            // smoke needs a genuinely shown native STA window.
+                            window.Show();
+                            await window.PromptSmokeAsync(options.PreviewPath!);
+                        }
                         else Console.WriteLine(await window.SmokeAsync(options.PreviewPath!,
                             options.Mode == "ui-advertise-smoke" ? options.Seconds : null,
                             options.Mode == "ui-pairing-smoke" ? options.Seconds : null, options.CancelAfterMs));

@@ -8,6 +8,7 @@ using System.Windows.Media.Imaging;
 using System.Windows.Markup;
 using System.Windows.Threading;
 using System.Windows.Shell;
+using System.Windows.Interop;
 using Windows.Devices.WiFiDirect;
 
 namespace Wanwei;
@@ -18,6 +19,7 @@ public sealed class MainWindow : Window, IPairingUi
     private readonly Button scan = MakeButton("扫描附近设备 · 15 秒", false);
     private readonly Button advertise = MakeButton("允许本次被发现 · 30 秒", false);
     private readonly Button pair = MakeButton("等待连接请求 · 60 秒", false);
+    private readonly Button startFileTransfer = MakeButton("开始 1 MiB 文件互传", true);
     private readonly Button stop = MakeButton("停止", false);
     private readonly Button export = MakeButton("导出本次报告", false);
     private readonly TextBlock state = Text("准备就绪", 20, "#F4F7FF");
@@ -35,6 +37,8 @@ public sealed class MainWindow : Window, IPairingUi
     private long? pairingPromptRemainingMs;
     private Button? pairingPromptAccept;
     private Button? pairingPromptReject;
+    private bool pairingPromptRenderObserved;
+    private bool pairingPromptFlashRequested;
     private readonly CheckBox transferExperiment = new() { Content = "实验：1 MiB 安全互传 · 连接最多保留 180 秒", Margin = new Thickness(0, 5, 0, 5), Foreground = Brushes.LightBlue };
     private readonly P0Identity identity;
     private bool transferEnabledForRun;
@@ -78,7 +82,8 @@ public sealed class MainWindow : Window, IPairingUi
         var buttons = new WrapPanel();
         foreach (var button in new[] { probe, scan, advertise, pair, stop, export }) buttons.Children.Add(button);
         stop.IsEnabled = false; export.IsEnabled = false;
-        if (labBootstrap is not null) probe.IsEnabled = scan.IsEnabled = advertise.IsEnabled = pair.IsEnabled = transferExperiment.IsEnabled = false;
+        if (labBootstrap is not null) probe.IsEnabled = scan.IsEnabled = advertise.IsEnabled = pair.IsEnabled = startFileTransfer.IsEnabled = transferExperiment.IsEnabled = false;
+        actionArea.Children.Add(startFileTransfer);
         actionArea.Children.Add(buttons);
         actionArea.Children.Add(transferExperiment);
         actionArea.Children.Add(state); state.Margin = new Thickness(0, 18, 0, 5);
@@ -103,6 +108,7 @@ public sealed class MainWindow : Window, IPairingUi
         scan.Click += async (_, _) => await RunAsync(15);
         advertise.Click += async (_, _) => await RunAsync(null, 30);
         pair.Click += async (_, _) => await RunAsync(null, pairingSeconds: 60);
+        startFileTransfer.Click += async (_, _) => await StartFileTransferAsync();
         stop.Click += (_, _) => { operation?.Cancel(); state.Text = "正在停止…"; stop.IsEnabled = false; };
         export.Click += (_, _) => Export();
         Closing += (_, e) => {
@@ -111,6 +117,15 @@ public sealed class MainWindow : Window, IPairingUi
             state.Text = "正在停止本次无线操作，随后关闭…";
         };
         Closed += (_, _) => identity.Dispose();
+    }
+
+    private async Task StartFileTransferAsync()
+    {
+        // A single explicit action fixes the run's file mode before any await.
+        // Diagnostic pairing keeps its independent checkbox / 20-second mode.
+        if (operation is not null || restartRequired || labBootstrap is not null) return;
+        transferExperiment.IsChecked = true;
+        await RunAsync(null, pairingSeconds: 60);
     }
 
     private async Task RunAsync(int? seconds, int? advertisementSeconds = null, int? pairingSeconds = null, int? cancelAfterMs = null)
@@ -122,15 +137,33 @@ public sealed class MainWindow : Window, IPairingUi
             labRunConsumed = true;
         }
         operation = new();
+        var runOperation = operation;
         transferEnabledForRun = pairingSeconds is not null && transferExperiment.IsChecked == true;
         transferExperiment.IsEnabled = false;
-        probe.IsEnabled = scan.IsEnabled = advertise.IsEnabled = pair.IsEnabled = export.IsEnabled = false;
+        probe.IsEnabled = scan.IsEnabled = advertise.IsEnabled = pair.IsEnabled = startFileTransfer.IsEnabled = export.IsEnabled = false;
         if (cancelAfterMs is not null) operation.CancelAfter(cancelAfterMs.Value);
         stop.IsEnabled = true;
         latest = null;
-        result.Text = "运行中"; activity.Clear(); state.Text = "正在检查…";
+        result.Text = "运行中"; activity.Clear(); state.Text = pairingSeconds is null ? "正在检查…" : "正在准备直连，请稍候…";
+        if (pairingSeconds is not null) hint.Text = "电脑报告已开始等待后，再在手机扫描并发起连接。";
         var updates = new Progress<string>(line => {
             activity.AppendText($"{DateTime.Now:HH:mm:ss}  {line}\n\n"); activity.ScrollToEnd();
+            if (!ReferenceEquals(operation, runOperation) || pairingSeconds is null) return;
+            // These messages are emitted by actual publisher / request lifecycle
+            // transitions. Clicking the entry alone never claims radio readiness.
+            if (line.StartsWith("等待手机发起连接，最多 ", StringComparison.Ordinal))
+            {
+                state.Text = "已开始等待 · 请在手机发起连接";
+                hint.Text = transferEnabledForRun
+                    ? "本轮已启用 1 MiB 文件互传；等待首个请求最多 60 秒，连接成功后打开文件窗口。"
+                    : "本轮为连接观察；等待首个请求最多 60 秒。";
+            }
+            else if (line.StartsWith("已收到首个连接请求。", StringComparison.Ordinal))
+            {
+                state.Text = "已收到请求 · 请确认连接";
+                hint.Text = "请处理当前及后续实际出现的确认；两次确认与建连共用原有 45 秒。";
+            }
+            else if (line == "系统报告本次 Direct 连接已断开。") state.Text = "本次 Direct 连接已断开";
         });
         try
         {
@@ -158,7 +191,7 @@ public sealed class MainWindow : Window, IPairingUi
                 state.Text = "本次无线资源释放尚未确认";
                 hint.Text = "请导出报告，关闭程序后重新打开。当前禁止启动第二次无线操作。";
             }
-            probe.IsEnabled = scan.IsEnabled = advertise.IsEnabled = pair.IsEnabled = !restartRequired && labBootstrap is null; stop.IsEnabled = false;
+            probe.IsEnabled = scan.IsEnabled = advertise.IsEnabled = pair.IsEnabled = startFileTransfer.IsEnabled = !restartRequired && labBootstrap is null; stop.IsEnabled = false;
             transferExperiment.IsEnabled = !restartRequired && labBootstrap is null;
             if (closeWhenDone) Close();
         }
@@ -276,6 +309,8 @@ public sealed class MainWindow : Window, IPairingUi
         Border? surface = null;
         DispatcherTimer? countdownTimer = null;
         EventHandler? countdownTick = null;
+        EventHandler? renderingHandler = null;
+        WindowAttention? windowAttention = null;
         string? previousTitle = null;
         TaskbarItemInfo? previousTaskbar = null;
         bool attentionApplied = false;
@@ -350,16 +385,38 @@ public sealed class MainWindow : Window, IPairingUi
                 pairingPrompt = surface;
                 Grid.SetRowSpan(surface, 5); System.Windows.Controls.Panel.SetZIndex(surface, 10);
                 ((Grid)Content).Children.Add(surface);
+                pairingPromptRenderObserved = false;
                 previousTitle = Title; previousTaskbar = TaskbarItemInfo;
                 attentionApplied = true;
                 Title = "【需要确认连接】" + previousTitle;
                 TaskbarItemInfo = new TaskbarItemInfo { ProgressState = TaskbarItemProgressState.Paused,
                     ProgressValue = 1, Description = "万维：需要确认连接" };
                 if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
-                Log("presented");
+                Log("overlay_attached");
                 bool activated = Activate();
-                Log(activated ? "activation_succeeded" : "activation_not_granted");
+                Log(activated ? "activation_call_returned_true" : "activation_call_returned_false");
+                windowAttention = new WindowAttention(this);
+                pairingPromptFlashRequested = windowAttention.Requested;
+                if (pairingPromptFlashRequested) Log("taskbar_flash_requested_count_3");
                 reject.Focus();
+                renderingHandler = (_, _) => {
+                    // A composition tick with valid live-window layout is only
+                    // observable app state. It proves neither lack of occlusion
+                    // nor that the person saw the prompt. Offscreen PNG rendering
+                    // cannot satisfy the live native PresentationSource check.
+                    bool sourcePresent = PresentationSource.FromVisual(this) is HwndSource;
+                    bool validLayout = surface.IsMeasureValid && surface.IsArrangeValid &&
+                        surface.ActualWidth > 0 && surface.ActualHeight > 0;
+                    if (!IsLoaded || !IsVisible || !sourcePresent || !validLayout ||
+                        WindowState == WindowState.Minimized || !ReferenceEquals(pairingPrompt, surface)) return;
+                    pairingPromptRenderObserved = true;
+                    Log("render_tick_observed;loaded=true;visible=true;source_present=true;layout_valid=true;minimized=false;" +
+                        "active=" + IsActive.ToString().ToLowerInvariant() + ";foreground_is_own=" +
+                        WindowAttention.IsOwnForeground(this).ToString().ToLowerInvariant());
+                    CompositionTarget.Rendering -= renderingHandler;
+                    renderingHandler = null;
+                };
+                CompositionTarget.Rendering += renderingHandler;
                 void RefreshCountdown()
                 {
                     pairingPromptRemainingMs = RemainingMs();
@@ -388,11 +445,15 @@ public sealed class MainWindow : Window, IPairingUi
         {
             await Dispatcher.InvokeAsync(() => {
                 if (countdownTimer is not null) { countdownTimer.Stop(); if (countdownTick is not null) countdownTimer.Tick -= countdownTick; }
+                if (renderingHandler is not null) CompositionTarget.Rendering -= renderingHandler;
+                windowAttention?.Dispose();
                 if (surface is not null) ((Grid)Content).Children.Remove(surface);
                 if (surface is not null && ReferenceEquals(pairingPrompt, surface))
                 {
                     pairingPrompt = null; pairingPromptRemainingMs = null;
                     pairingPromptAccept = pairingPromptReject = null;
+                    pairingPromptRenderObserved = false;
+                    pairingPromptFlashRequested = false;
                 }
                 if (attentionApplied) { Title = previousTitle!; TaskbarItemInfo = previousTaskbar; }
                 Log(cancellation.IsCancellationRequested ? "cancelled" : terminalStage);
@@ -435,6 +496,8 @@ public sealed class MainWindow : Window, IPairingUi
             var path = P0Path.Create(endpoints, pathVerified);
             window = new(identity, path, reportDirectory, cancellation) { Owner = this };
             window.Show();
+            state.Text = "文件互传窗口已打开 · 连接最多保留 180 秒";
+            hint.Text = "本次已取得实际 Direct 端点；请在文件窗口确认完整指纹，再选择发送或接收。";
         }, DispatcherPriority.Normal, cancellation);
         await window!.ClosedTask.ConfigureAwait(false);
         return window.ResourceReleaseConfirmed;
@@ -522,22 +585,38 @@ public sealed class MainWindow : Window, IPairingUi
     }
     internal async Task PromptSmokeAsync(string previewPath)
     {
-        // Synthetic prompt only; no publisher, device, pairing or socket API.
+        // Synthetic prompt in a shown native STA window. No publisher, device,
+        // pairing or socket API. Live app state is not proof of human visibility.
+        await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+        if (!IsLoaded || !IsVisible || PresentationSource.FromVisual(this) is not HwndSource ||
+            new WindowInteropHelper(this).Handle == 0)
+            throw new InvalidOperationException("Prompt smoke requires a shown, loaded native window.");
+        if (!startFileTransfer.IsEnabled || transferExperiment.IsChecked == true || ObservationSeconds != 20)
+            throw new InvalidOperationException("Initial file entry or independent diagnostic mode changed.");
         string originalTitle = Title;
         var originalTaskbar = TaskbarItemInfo;
         void AssertPromptRestored()
         {
-            if (pairingPrompt is not null || pairingPromptRemainingMs is not null || pairingPromptAccept is not null || pairingPromptReject is not null)
+            if (pairingPrompt is not null || pairingPromptRemainingMs is not null || pairingPromptAccept is not null || pairingPromptReject is not null ||
+                pairingPromptRenderObserved || pairingPromptFlashRequested)
                 throw new InvalidOperationException("Finished prompt retained its overlay or controls.");
             if (Title != originalTitle || !ReferenceEquals(TaskbarItemInfo, originalTaskbar))
                 throw new InvalidOperationException("Finished prompt retained its title or taskbar attention.");
         }
+        WindowState = WindowState.Minimized;
+        await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+        if (WindowState != WindowState.Minimized) throw new InvalidOperationException("Synthetic minimize setup did not persist until the dispatcher yielded.");
         using var cancel = new CancellationTokenSource();
         var pending = ConfirmAsync(new("synthetic-ui-preview", "ConfirmPinMatch", "12345678", 8_000), cancel.Token);
-        await Task.Delay(100);
-        if (pairingPrompt is null) throw new InvalidOperationException("Synthetic pairing prompt was not rendered.");
+        // Do not call RenderPreview before this assertion: an offscreen bitmap
+        // must never substitute for the live layout / composition observation.
+        for (int attempt = 0; attempt < 40 && !pairingPromptRenderObserved; attempt++) await Task.Delay(50);
+        if (pairingPrompt is null || !pairingPromptRenderObserved || WindowState != WindowState.Normal ||
+            !IsLoaded || !IsVisible || PresentationSource.FromVisual(this) is not HwndSource)
+            throw new InvalidOperationException("Shown prompt did not restore from minimized with live native layout and a composition tick.");
         if (!Title.StartsWith("【需要确认连接】", StringComparison.Ordinal) || TaskbarItemInfo?.ProgressState != TaskbarItemProgressState.Paused)
-            throw new InvalidOperationException("Synthetic pairing prompt had no visible attention state.");
+            throw new InvalidOperationException("Synthetic pairing prompt had no title / taskbar attention state.");
+        if (!pairingPromptFlashRequested) throw new InvalidOperationException("Shown prompt did not request its bounded taskbar flash.");
         if (pairingPromptReject is not { IsDefault: true } || pairingPromptAccept is not { IsDefault: false })
             throw new InvalidOperationException("Pairing acceptance became the default action.");
         long firstRemaining = pairingPromptRemainingMs ?? throw new InvalidOperationException("Prompt had no remaining budget.");
@@ -589,6 +668,6 @@ public sealed class MainWindow : Window, IPairingUi
         try { _ = await queuedBegin; throw new InvalidOperationException("Expired queued dispatcher callback executed."); }
         catch (NativeConnectionBoundaryException) { }
         if (queuedNativeBegan) throw new InvalidOperationException("Expired queued dispatcher callback began a native operation.");
-        Console.WriteLine("Synthetic pairing UI countdown decreased without a new budget; expired stale clicks were rejected; cancellation removed the overlay; title/taskbar attention restored; pre-cancel and zero-budget prompts were not displayed. Dispatcher handoff retained a begun operation during cancellation, skipped pre-cancel, and blocked an expired original boundary inside the actual queued STA callback without starting an operation. No radio tested.");
+        Console.WriteLine("Shown native STA prompt restored from minimized with loaded / visible state, a live native presentation source, valid layout and a composition tick before offscreen preview. Bounded taskbar flash requested; default remained Reject. Countdown decreased without a new budget; expired stale clicks were rejected; cancellation removed the overlay and restored title / taskbar state while stopping attention. Pre-cancel and zero-budget prompts were not attached. Dispatcher handoff retained a begun operation during cancellation, skipped pre-cancel, and blocked an expired original boundary inside the actual queued STA callback without starting an operation. These app-state checks do not prove human visibility or lack of occlusion. No radio tested.");
     }
 }
