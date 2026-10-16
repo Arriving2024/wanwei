@@ -406,6 +406,10 @@ public sealed class MainWindow : Window, IPairingUi
     {
         return await BeginOnUiAsync(() => WiFiDirectDevice.FromIdAsync(deviceId), cancellation);
     }
+    public async Task<Windows.Foundation.IAsyncOperation<WiFiDirectDevice>> BeginConnectionAsync(string deviceId, Func<bool> mayBegin, CancellationToken cancellation)
+    {
+        return await BeginOnUiAsync(() => WiFiDirectDevice.FromIdAsync(deviceId), cancellation, mayBegin);
+    }
     public int ObservationSeconds => labBootstrap is not null ? 600 : transferEnabledForRun ? 180 : 20;
     public bool FixtureLabPreauthorized => labBootstrap is not null;
     public bool NativePeerAllowed(string deviceId, string? deviceAddress) => labBootstrap?.AllowsNativePeer(deviceId, deviceAddress) ?? true;
@@ -435,12 +439,13 @@ public sealed class MainWindow : Window, IPairingUi
         await window!.ClosedTask.ConfigureAwait(false);
         return window.ResourceReleaseConfirmed;
     }
-    private async Task<T> BeginOnUiAsync<T>(Func<T> begin, CancellationToken cancellation)
+    private async Task<T> BeginOnUiAsync<T>(Func<T> begin, CancellationToken cancellation, Func<bool>? mayBegin = null)
     {
         // Never add WaitAsync(cancellation) around this handoff: once the native
         // call begins, its operation must reach the session's late-result owner.
         return await Dispatcher.InvokeAsync(() => {
             cancellation.ThrowIfCancellationRequested();
+            if (mayBegin is not null && !mayBegin()) throw new NativeConnectionBoundaryException();
             return begin();
         }, DispatcherPriority.Normal, cancellation);
     }
@@ -568,6 +573,22 @@ public sealed class MainWindow : Window, IPairingUi
         try { _ = await BeginOnUiAsync(() => { started = true; return new object(); }, handoffCancel.Token); throw new InvalidOperationException("Pre-cancel dispatcher callback executed."); }
         catch (OperationCanceledException) { }
         if (started) throw new InvalidOperationException("Pre-cancel dispatcher callback executed.");
-        Console.WriteLine("Synthetic pairing UI countdown decreased without a new budget; expired stale clicks were rejected; cancellation removed the overlay; title/taskbar attention restored; pre-cancel and zero-budget prompts were not displayed. Dispatcher handoff retained a begun operation during cancellation and skipped pre-cancel. No radio tested.");
+        // Enqueue from a worker while this actual STA is occupied. End the
+        // synthetic original boundary before the queued callback may execute.
+        // No token is cancelled: the in-dispatch predicate itself must block it.
+        int mayBeginQueued = 1; bool queuedNativeBegan = false;
+        var enqueued = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var queuedBegin = Task.Run(async () => {
+            var pendingBegin = BeginOnUiAsync(() => { queuedNativeBegan = true; return new object(); },
+                CancellationToken.None, () => Volatile.Read(ref mayBeginQueued) == 1);
+            enqueued.TrySetResult();
+            return await pendingBegin.ConfigureAwait(false);
+        });
+        if (!enqueued.Task.Wait(TimeSpan.FromSeconds(2))) throw new InvalidOperationException("Synthetic dispatcher handoff was not queued.");
+        Volatile.Write(ref mayBeginQueued, 0);
+        try { _ = await queuedBegin; throw new InvalidOperationException("Expired queued dispatcher callback executed."); }
+        catch (NativeConnectionBoundaryException) { }
+        if (queuedNativeBegan) throw new InvalidOperationException("Expired queued dispatcher callback began a native operation.");
+        Console.WriteLine("Synthetic pairing UI countdown decreased without a new budget; expired stale clicks were rejected; cancellation removed the overlay; title/taskbar attention restored; pre-cancel and zero-budget prompts were not displayed. Dispatcher handoff retained a begun operation during cancellation, skipped pre-cancel, and blocked an expired original boundary inside the actual queued STA callback without starting an operation. No radio tested.");
     }
 }

@@ -171,6 +171,7 @@ internal static class SelfTests
         Check("native report defers transfer claim to explicit P0 evidence", json.Contains("\"transfer\": \"separate_opt_in_P0_report\""));
         Check("report cannot claim internet continuity", json.Contains("\"internetContinuity\": \"not_tested\""));
         Check("report cannot claim iOS interoperability", json.Contains("\"iosWindowsInterop\": \"unverified\""));
+        NativeConnectionRetrySelfTests.Run(Check);
         P0SelfTests.Run(Check);
         Console.WriteLine($"{passed} local checks passed including authenticated TLS loopback. No radio interoperability was tested by these checks.");
         return 0;

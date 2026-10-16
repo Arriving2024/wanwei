@@ -15,6 +15,10 @@ public interface IPairingUi
     Task<PairingDecision> ConfirmAsync(PairingPrompt prompt, CancellationToken cancellation);
     // The implementation must begin FromIdAsync on its live STA UI dispatcher.
     Task<IAsyncOperation<WiFiDirectDevice>> BeginConnectionAsync(string deviceId, CancellationToken cancellation);
+    // Older implementations remain source-compatible, but fail closed until
+    // they can check the boundary inside the actual STA dispatcher callback.
+    Task<IAsyncOperation<WiFiDirectDevice>> BeginConnectionAsync(string deviceId, Func<bool> mayBegin, CancellationToken cancellation) =>
+        Task.FromException<IAsyncOperation<WiFiDirectDevice>>(new NotSupportedException("Native connection requires an in-dispatch boundary guard."));
     int ObservationSeconds => 20;
     bool FixtureLabPreauthorized => false;
     bool NativePeerAllowed(string deviceId, string? deviceAddress) => true;
@@ -256,9 +260,19 @@ internal sealed class DirectPairing
             lock (gate) if (!MayNegotiateLocked()) return;
             outcome = "connection_pending";
             Record("connection", "FromIdAsync_requested_on_UI_thread");
-            var operation = await ui.BeginConnectionAsync(information.Id, lifetime.Token).ConfigureAwait(false);
-            var createdDevice = await ObserveAsync(operation, lifetime.Token, late => late?.Dispose()).ConfigureAwait(false);
-            if (createdDevice is null) { error = "FROM_ID_RETURNED_NULL"; outcome = "connection_failed"; return; }
+            var createdDevice = await NativeConnectionRetry.RunAsync<WiFiDirectDevice>(information.Id,
+                async (id, token) => new NativeDeviceConnectionOperation(await ui.BeginConnectionAsync(id,
+                    () => { lock (gate) return MayNegotiateLocked(); }, token).ConfigureAwait(false)),
+                AepAssociationPolicy.SkipFreshPairing(alreadyPaired, associationCheck),
+                decision.Accept && (userAccepted || ui.FixtureLabPreauthorized),
+                () => { lock (gate) return MayNegotiateLocked(); },
+                status => Record("connection", status), RetainUncertainConnection,
+                late => late.Dispose(), lifetime.Token).ConfigureAwait(false);
+            if (createdDevice is null)
+            {
+                lock (gate) if (!MayNegotiateLocked()) return;
+                error = "FROM_ID_RETURNED_NULL"; outcome = "connection_failed"; return;
+            }
             bool adopted;
             lock (gate)
             {
@@ -295,6 +309,7 @@ internal sealed class DirectPairing
             }
             await Task.Delay(Timeout.InfiniteTimeSpan, lifetime.Token).ConfigureAwait(false);
         }
+        catch (NativeConnectionBoundaryException) { Record("connection", "native_begin_blocked_by_original_boundary"); }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { Record("request", "cancel_or_deadline"); }
         catch (Exception ex) { Fail(ex); }
         finally
@@ -310,6 +325,37 @@ internal sealed class DirectPairing
             // there is no reason to consume the remainder of the current phase.
             sessionEnded.TrySetResult();
         }
+    }
+
+    private void RetainUncertainConnection(object operation, string reason)
+    {
+        lock (gate) { releaseConfirmed = false; error ??= reason; }
+        lock (uncertainSessions) uncertainSessions.Add(operation);
+    }
+
+    private sealed class NativeDeviceConnectionOperation(IAsyncOperation<WiFiDirectDevice> operation)
+        : INativeConnectionOperation<WiFiDirectDevice>
+    {
+        public Task<WiFiDirectDevice?> Completion
+        {
+            get
+            {
+                // Keep projection setup synchronous so a setup failure cannot
+                // be mistaken for a terminal native enumeration failure.
+                var task = operation.AsTask();
+                return ReadAsync(task);
+            }
+        }
+        private static async Task<WiFiDirectDevice?> ReadAsync(Task<WiFiDirectDevice> task) => await task.ConfigureAwait(false);
+        public NativeConnectionOperationState State => operation.Status switch {
+            AsyncStatus.Started => NativeConnectionOperationState.Started,
+            AsyncStatus.Completed => NativeConnectionOperationState.Completed,
+            AsyncStatus.Canceled => NativeConnectionOperationState.Canceled,
+            AsyncStatus.Error => NativeConnectionOperationState.Error,
+            _ => NativeConnectionOperationState.Unknown
+        };
+        public void Cancel() => operation.Cancel();
+        public void Close() => operation.Close();
     }
 
     private void PairingRequested(DeviceInformationCustomPairing sender, DevicePairingRequestedEventArgs args)
