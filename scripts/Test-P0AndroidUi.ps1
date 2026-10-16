@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory=$true)]
-    [ValidateSet('TrustPeer','PrepareSender','SetDestination','Send','Receive','Accept','Reject','Cancel')][string]$Action,
+    [ValidateSet('TrustPeer','PrepareSender','PrepareSend','PrepareReceive','SetDestination','Send','Receive','Accept','Reject','Cancel')][string]$Action,
     [string]$PeerFingerprint,
     [string]$PeerAddress,
     [int]$PeerPort
@@ -44,10 +44,16 @@ function Tap-P0Node($node) {
 }
 function Find-P0Control([string]$Name) {
     $id = "$wanweiPackage`:id/$Name"
+    $lastBounds = 'not_observed'; $lastEnabled = 'not_observed'
     for ($try = 0; $try -lt 8; $try++) {
         $ui = Read-P0Ui
         $nodes = $ui.SelectNodes("//node[@package='$wanweiPackage' and @resource-id='$id']")
         if ($nodes.Count -gt 1) { throw 'Ambiguous Wanwei control.' }
+        if ($nodes.Count -eq 1) {
+            # Report only bounded geometry and state, never UI text or identities.
+            $lastBounds = if ($nodes[0].bounds -match '^\[(\d+),(\d+)\]\[(\d+),(\d+)\]$') { [string]$nodes[0].bounds } else { 'invalid' }
+            $lastEnabled = if ($nodes[0].enabled -in @('true','false')) { [string]$nodes[0].enabled } else { 'unknown' }
+        }
         $content = $ui.SelectSingleNode("//node[@package='$wanweiPackage' and @resource-id='android:id/content']")
         if ($null -eq $content -or $content.bounds -notmatch '^\[0,0\]\[(\d+),(\d+)\]$') { throw 'App viewport unavailable.' }
         $x = [int]([int]$Matches[1]*.5); $height = [int]$Matches[2]
@@ -67,7 +73,7 @@ function Find-P0Control([string]$Name) {
         }
         $null = Invoke-P0UiAdb @('shell','input','swipe',"$x","$from","$x","$to",'400')
     }
-    throw 'Requested P0 control could not be positioned.'
+    throw "Requested P0 control could not be positioned. ControlId=$id; LastObservedBounds=$lastBounds; LastObservedEnabled=$lastEnabled; Attempts=8."
 }
 function Set-P0Text([string]$Name,[string]$Value) {
     $node = Find-P0Control $Name
@@ -92,6 +98,10 @@ $policy = Invoke-P0UiAdb @('shell','dumpsys','window','policy')
 if ($policy -notmatch '(?m)^\s+showing=false\s*$') { throw 'Device owner must unlock the phone.' }
 switch ($Action) {
     'PrepareSender' { $null = Find-P0Control 'transfer_peer_port' }
+    # Preparation only scrolls the ordinary controls into view; it never taps or
+    # starts a transfer, and does not depend on the hidden manual port fields.
+    'PrepareSend' { $null = Find-P0Control 'transfer_send' }
+    'PrepareReceive' { $null = Find-P0Control 'transfer_listen' }
     'TrustPeer' {
         if ($PeerFingerprint -notmatch '^[0-9a-f]{64}$') { throw 'A verified full lowercase fingerprint is required.' }
         Set-P0Text 'transfer_peer_pin' $PeerFingerprint
@@ -112,4 +122,8 @@ switch ($Action) {
     }
 }
 $null = Read-P0Ui
-Write-Output "Visible Wanwei P0 action completed: $Action. Inspect the fresh transfer report for actual results."
+if ($Action -in @('PrepareSend','PrepareReceive')) {
+    Write-Output "Visible Wanwei P0 preparation completed: $Action. No transfer was started."
+} else {
+    Write-Output "Visible Wanwei P0 action completed: $Action. Inspect the fresh transfer report for actual results."
+}
