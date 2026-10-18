@@ -1,6 +1,6 @@
 # 从源码构建
 
-更新：2026-10-15。Windows 与 Android 开发源码为 0.3.2，已加入自动端口提示和 Android 重连清理修复；已发布 0.3.1 的物理设备结果与新流程待验项目见[文件实验记录](p0-file-transfer.md)。源码不包含 SDK、原始设备报告、签名密钥或个人媒体。
+更新：2026-10-18。Windows 与 Android 开发源码为 0.3.2，已加入自动端口提示和 Android 重连清理修复；已发布 0.3.1 的物理设备结果与新流程待验项目见[文件实验记录](p0-file-transfer.md)。源码不包含 SDK、原始设备报告、签名密钥或个人媒体。
 
 ## Windows
 
@@ -36,7 +36,7 @@ macOS/Linux 使用 `./gradlew`。首次需要联网。Windows/JDK 在中文路�
 
 输出为 `app/build/outputs/apk/debug/app-debug.apk`，使用本机 Android Debug 签名，供个人设备实验；不是应用商店正式签名。不同开发机器的 Debug 签名可能不同，不能直接覆盖另一签名的安装，不自动卸载旧应用。
 
-0.3.2 的编译、Lint、45 项本地测试与 APK v2 签名校验已通过。能力探测的最低系统版本仍为 Android 8；安全文件实验要求 Android 10/API 29 以上的平台 TLS 1.3。应用安装身份由 AndroidKeyStore 保管，公开报告只包含公钥证书与指纹。
+0.3.2（Android build 11）的编译、Lint、62 项本地测试与 APK v2 签名校验已通过，其中17项覆盖新增独立2.4 GHz空组探针的所有权、时限和清理边界。该探针尚未安装到真机或启动实测。能力探测的最低系统版本仍为 Android 8；安全文件实验要求 Android 10/API 29 以上的平台 TLS 1.3。应用安装身份由 AndroidKeyStore 保管，公开报告只包含公钥证书与指纹。
 
 连接自己的测试设备、授权 USB 调试后，可用 SDK 的 `adb install -r` 安装。开启 WLAN，按系统提示授予附近设备等权限。授权由设备持有人处理。
 

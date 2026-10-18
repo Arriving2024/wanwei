@@ -22,4 +22,7 @@
     <item name="transfer_reject" type="id" />
     <item name="transfer_cancel" type="id" />
     <item name="usb_lab_state" type="id" />
+    <item name="group_probe_state" type="id" />
+    <item name="group_probe_start" type="id" />
+    <item name="group_probe_stop" type="id" />
 </resources>

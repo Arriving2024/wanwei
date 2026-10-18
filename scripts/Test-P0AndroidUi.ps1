@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory=$true)]
-    [ValidateSet('TrustPeer','PrepareSender','PrepareSend','PrepareReceive','SetDestination','Send','Receive','Accept','Reject','Cancel')][string]$Action,
+    [ValidateSet('TrustPeer','PrepareSender','PrepareSend','PrepareReceive','PrepareGroupProbe','StartGroupProbe','StopGroupProbe','SetDestination','Send','Receive','Accept','Reject','Cancel')][string]$Action,
     [string]$PeerFingerprint,
     [string]$PeerAddress,
     [int]$PeerPort
@@ -68,8 +68,15 @@ function Find-P0Control([string]$Name) {
         $from = [int]($height*.75); $to = [int]($height*.35)
         if ($nodes.Count -eq 1 -and $nodes[0].bounds -match '^\[(\d+),(\d+)\]\[(\d+),(\d+)\]$') {
             $center = ([int]$Matches[2]+[int]$Matches[4])/2
-            if ([int]$Matches[3] -gt [int]$Matches[1] -and [int]$Matches[4] -gt [int]$Matches[2] -and $center -ge $height*.15 -and $center -le $height*.85) { return $nodes[0] }
-            if ($center -lt $height*.15) { $from=[int]($height*.3);$to=[int]($height*.7) }
+            $hasArea = [int]$Matches[3] -gt [int]$Matches[1] -and [int]$Matches[4] -gt [int]$Matches[2]
+            if ($hasArea -and $center -ge $height*.15 -and $center -le $height*.85) { return $nodes[0] }
+            # Small corrections for an already visible control avoid bouncing
+            # between Honor's status capsule and the bottom of a long page.
+            if ($hasArea) {
+                $step = [int]($height*.08)
+                $from = [int]($height*.5)
+                $to = if ($center -lt $height*.15) { $from+$step } else { $from-$step }
+            }
         }
         $null = Invoke-P0UiAdb @('shell','input','swipe',"$x","$from","$x","$to",'400')
     }
@@ -100,8 +107,24 @@ switch ($Action) {
     'PrepareSender' { $null = Find-P0Control 'transfer_peer_port' }
     # Preparation only scrolls the ordinary controls into view; it never taps or
     # starts a transfer, and does not depend on the hidden manual port fields.
-    'PrepareSend' { $null = Find-P0Control 'transfer_send' }
-    'PrepareReceive' { $null = Find-P0Control 'transfer_listen' }
+    'PrepareSend' {
+        if ((Find-P0Control 'transfer_send').enabled -ne 'true') { throw 'Send is unavailable; no transfer was started.' }
+    }
+    'PrepareReceive' {
+        if ((Find-P0Control 'transfer_listen').enabled -ne 'true') { throw 'Receive is unavailable; no transfer was started.' }
+    }
+    'PrepareGroupProbe' {
+        if ((Find-P0Control 'group_probe_start').enabled -ne 'true') { throw 'Standalone group probe is unavailable; no probe was started.' }
+    }
+    'StartGroupProbe' {
+        Tap-P0Node (Find-P0Control 'group_probe_start')
+        $ui = Read-P0Ui
+        if ($null -eq $ui.SelectSingleNode("//node[@package='$wanweiPackage' and @text='检测手机的 2.4 GHz 独立直连？']")) {
+            throw 'Expected standalone group confirmation is absent; no other prompt will be accepted.'
+        }
+        Tap-P0Node ($ui.SelectSingleNode("//node[@package='$wanweiPackage' and @resource-id='android:id/button1' and @text='开始本次检测']"))
+    }
+    'StopGroupProbe' { Tap-P0Node (Find-P0Control 'group_probe_stop') }
     'TrustPeer' {
         if ($PeerFingerprint -notmatch '^[0-9a-f]{64}$') { throw 'A verified full lowercase fingerprint is required.' }
         Set-P0Text 'transfer_peer_pin' $PeerFingerprint
@@ -122,8 +145,10 @@ switch ($Action) {
     }
 }
 $null = Read-P0Ui
-if ($Action -in @('PrepareSend','PrepareReceive')) {
+if ($Action -in @('PrepareSend','PrepareReceive','PrepareGroupProbe')) {
     Write-Output "Visible Wanwei P0 preparation completed: $Action. No transfer was started."
+} elseif ($Action -in @('StartGroupProbe','StopGroupProbe')) {
+    Write-Output "Visible standalone group probe action completed: $Action. Inspect standaloneGroupProbe in the fresh group-probe report; this is not file-transfer evidence."
 } else {
     Write-Output "Visible Wanwei P0 action completed: $Action. Inspect the fresh transfer report for actual results."
 }

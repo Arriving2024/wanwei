@@ -79,6 +79,11 @@ class MainActivity : Activity() {
     private lateinit var cancelPairButton: Button
     private lateinit var pairingText: TextView
     private lateinit var pairing: DirectPairingSession
+    private lateinit var groupProbe: DirectGroupProbeSession
+    private lateinit var groupProbeButton: Button
+    private lateinit var stopGroupProbeButton: Button
+    private lateinit var groupProbeText: TextView
+    private var pendingGroupProbePermission = false
     private lateinit var fileExperimentCheckBox: CheckBox
     private lateinit var localPinText: TextView
     private lateinit var transferStateText: TextView
@@ -167,6 +172,13 @@ class MainActivity : Activity() {
             }
             persistReport("pairing", allowAfterDestroy = true)
         }
+        groupProbe = DirectGroupProbeSession(this, ::anonymousToken) { message ->
+            if (!destroyed) {
+                if (message.isNotBlank()) groupProbeText.text = message
+                updateButtons()
+            }
+            persistReport("group-probe", allowAfterDestroy = true)
+        }
         buildUi()
         pairing.beforeCleanup = { if (::transfer.isInitialized) transfer.cancel("DIRECT_PATH_UNVERIFIED") }
         prepareIdentity()
@@ -220,6 +232,8 @@ class MainActivity : Activity() {
         pendingPermissionScan = false
         if (scanning) finishScan("activity_stopped", "界面离开前台，已结束本次扫描。")
         pendingPairPermission = false
+        pendingGroupProbePermission = false
+        groupProbe.cancel("lifecycle_cancelled")
         if (::transfer.isInitialized) transfer.cancel("CANCELLED")
         if (pairing.awaitingSystemNegotiation) pairing.noteLifecycle("activity_stopped_during_bounded_system_negotiation")
         else if (pairing.busy) pairing.cancel("activity_stopped")
@@ -234,6 +248,7 @@ class MainActivity : Activity() {
         deactivateUsbLab("activity_destroyed")
         if (::transfer.isInitialized) transfer.cancel("CANCELLED")
         pairing.cancel("activity_destroyed")
+        groupProbe.cancel("lifecycle_cancelled")
         if (scanning) finishScan("activity_destroyed", "界面关闭，已结束本次扫描。")
         // A closing Activity cannot wait indefinitely for the platform's stop callback.
         if (stopping) {
@@ -401,6 +416,16 @@ class MainActivity : Activity() {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == GROUP_PROBE_PERMISSION_REQUEST) {
+            val proceed = pendingGroupProbePermission
+            pendingGroupProbePermission = false
+            probeCapabilities()
+            if (proceed && started && hasDiscoveryPermission() &&
+                checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED)
+                confirmGroupProbe()
+            else groupProbeText.text = "权限已更新或授权未完成；本轮未创建直连。请确认权限后重新点击检测。"
+            return
+        }
         if (requestCode == PAIR_PERMISSION_REQUEST) {
             val proceed = pendingPairPermission
             pendingPairPermission = false
@@ -643,8 +668,10 @@ class MainActivity : Activity() {
         .put("runId", runId).put("runStartedAtUtc", startedAt).put("capabilityProbe", probe)
         .put("scan", currentScan ?: JSONObject.NULL)
         .put("pairing", pairing.report() ?: JSONObject.NULL)
+        .put("standaloneGroupProbe", groupProbe.report() ?: JSONObject.NULL)
         .put("evidenceBoundary", JSONObject().put("capabilityProbeExecuted", true)
             .put("pairingImplemented", true).put("actualDirectConnectionObserved", pairing.report()?.optBoolean("actualConnectionObserved") ?: false)
+            .put("standaloneGroupProbeIsFileTransferEvidence", false)
             .put("applicationIdentityAuthenticated", false).put("fileTransferImplemented", true)
             .put("applicationTransferEvidence", "files/reports/latest-transfer.json")
             .put("originalWifiPreservationVerified", false).put("crossPlatformCompatibilityVerified", false)
@@ -782,11 +809,19 @@ class MainActivity : Activity() {
         cancelPairButton.id = R.id.pair_cancel
         addText(connection, "默认连接后观察 20 秒；明确开启文件实验时最多 180 秒。系统确认窗口遮挡页面时继续有限等待；关闭页面会停止文件任务并请求释放。", 12f, muted, false, 12)
         buildTransferUi()
-        val evidence = card("05  诊断记录")
+        val compatibility = card("05  兼容直连检测")
+        addText(compatibility, "仅尝试由手机建立 2.4 GHz 独立直连，观察原 Wi-Fi 后结束。本轮不连接电脑、不传文件，也不开放文件接收端口。", 14f, muted, false, 12)
+        groupProbeText = addText(compatibility, "尚未检测。需要先连接原 Wi-Fi；结果不代表跨设备互传或连续上网已通过。", 14f, Color.WHITE, false, 12)
+        groupProbeText.id = R.id.group_probe_state
+        groupProbeButton = button(compatibility, "检测 2.4 GHz 独立直连", true) { requestGroupProbe() }
+        groupProbeButton.id = R.id.group_probe_start
+        stopGroupProbeButton = button(compatibility, "停止本轮检测") { groupProbe.cancel() }
+        stopGroupProbeButton.id = R.id.group_probe_stop
+        val evidence = card("06  诊断记录")
         reportText = addText(evidence, "准备本机报告……", 13f, muted, false, 12)
         exportButton = button(evidence, "导出 JSON 报告") { exportReport() }
         exportButton.id = R.id.export_report
-        addText(evidence, "当前版本：0.3.2。只传合成的 1 MiB 测试文件。首次仍需核对完整公钥；默认角色下可自动交换端口，每次收文件仍需明确接受。真机结果以两端报告为准。", 13f, Color.rgb(242, 205, 142), false, 14)
+        addText(evidence, "当前版本：0.3.2。只传合成的 1 MiB 测试文件。首次仍需核对完整公钥；默认角色下可自动交换端口，每次收文件仍需明确接受。新增独立直连检测尚未真机验收，不能替代文件互传结果。", 13f, Color.rgb(242, 205, 142), false, 14)
         button(content, "系统定位设置") { openSettings(Settings.ACTION_LOCATION_SOURCE_SETTINGS) }
         button(content, "应用权限设置") {
             try {
@@ -821,16 +856,21 @@ class MainActivity : Activity() {
 
     private fun updateButtons() {
         if (!::scanButton.isInitialized) return
-        val idle = !scanning && !stopping && !pairing.busy && !pairing.retryLocked && !DirectPairingSession.radioGate.occupied()
+        val idle = !scanning && !stopping && !pairing.busy && !pairing.retryLocked && !groupProbe.busy &&
+            !groupProbe.retryLocked && !DirectPairingSession.radioGate.occupied()
         scanButton.isEnabled = idle
-        probeButton.isEnabled = !scanning && !stopping && !pairing.busy
+        probeButton.isEnabled = !scanning && !stopping && !pairing.busy && !groupProbe.busy
         stopButton.isEnabled = scanning
-        exportButton.isEnabled = !scanning && !stopping && !pairing.busy
+        exportButton.isEnabled = !scanning && !stopping && !pairing.busy && !groupProbe.busy
         selectPeerButton.isEnabled = idle && livePeers.isNotEmpty()
         preferPhoneGoCheckBox.isEnabled = idle
         fileExperimentCheckBox.isEnabled = idle
         connectButton.isEnabled = idle && selectedPeerToken != null
         cancelPairButton.isEnabled = pairing.busy && !pairing.isStopping
+        if (::groupProbeButton.isInitialized) {
+            groupProbeButton.isEnabled = idle && fileTasksSettled() && Build.VERSION.SDK_INT >= 29 && usbLabNonce == null
+            stopGroupProbeButton.isEnabled = groupProbe.busy
+        }
         if (::receiveTestButton.isInitialized) {
             val transferring = ::transfer.isInitialized && transfer.busy
             val path = pairing.verifiedTransferPath()
@@ -851,8 +891,52 @@ class MainActivity : Activity() {
                 transferStateText.text = "当前由手机建立直连，尚不能自动确认电脑地址。请用默认角色重新建链，或明确切换为手工实验。"
         }
         if (DirectPairingSession.radioGate.locked()) pairingText.text = "上次系统释放未确认，当前进程已锁定新的扫描和连接。请先结束系统 Direct 连接并重新打开应用。"
+        else if (groupProbe.busy) pairingText.text = "正在检测手机独立直连；本轮不连接电脑，请等待检测和清理结束。"
         else if (DirectPairingSession.radioGate.occupied() && !scanning && !stopping && !pairing.busy)
             pairingText.text = "上一页面的实验仍在清理，请等待结束后重试。"
+    }
+
+    private fun fileTasksSettled(): Boolean = !::transfer.isInitialized || (!transfer.busy && !transfer.retryLocked)
+
+    private fun groupProbeCanStart(): Boolean = started && !scanning && !stopping && !pairing.busy &&
+        !pairing.retryLocked && !groupProbe.busy && !groupProbe.retryLocked &&
+        !DirectPairingSession.radioGate.occupied() && usbLabNonce == null && fileTasksSettled()
+
+    private fun requestGroupProbe() {
+        if (!groupProbeCanStart()) return
+        if (Build.VERSION.SDK_INT < 29) {
+            groupProbeText.text = "此项检测需要 Android 10 或以上。"
+            return
+        }
+        if (!hasDiscoveryPermission() || checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            AlertDialog.Builder(this).setTitle("本次检测权限")
+                .setMessage("附近设备权限用于创建本机直连；精确定位权限只用于核对原 Wi-Fi 接入点是否保持，程序不读取地理位置。无法核对原 Wi-Fi 时，不启动本次检测。")
+                .setPositiveButton("继续并请求权限") { _, _ ->
+                    pendingGroupProbePermission = true
+                    val permissions = mutableListOf(Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION)
+                    if (Build.VERSION.SDK_INT >= 33) permissions.add(Manifest.permission.NEARBY_WIFI_DEVICES)
+                    requestPermissions(permissions.toTypedArray(), GROUP_PROBE_PERMISSION_REQUEST)
+                }.setNegativeButton("取消", null).show()
+            return
+        }
+        confirmGroupProbe()
+    }
+
+    private fun confirmGroupProbe() {
+        if (!groupProbeCanStart()) return
+        if (locationEnabled() == false) {
+            groupProbeText.text = "请先开启系统定位开关，以核对原 Wi-Fi；本轮未创建直连。"
+            return
+        }
+        AlertDialog.Builder(this).setTitle("检测手机的 2.4 GHz 独立直连？")
+            .setMessage("本次只由手机临时建立直连，观察后清理；不连接电脑、不传文件。如果已有其他直连，将保留它并停止检测。检测结果以实际频段和原 Wi-Fi 报告为准；若系统要求断开原 WLAN，请拒绝并停止本轮。")
+            .setPositiveButton("开始本次检测") { _, _ ->
+                if (groupProbeCanStart() && hasDiscoveryPermission() &&
+                    checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                    groupProbe.start()
+                    updateButtons()
+                }
+            }.setNegativeButton("取消", null).show()
     }
 
     private fun peerDisplayName(rawName: String?): String {
@@ -1024,7 +1108,8 @@ class MainActivity : Activity() {
         val requestedNonce = intent?.getStringExtra("wanwei_lab_nonce") ?: return
         if (!::identity.isInitialized || !::transfer.isInitialized || confirmedPeerPin == null) return
         intent.removeExtra("wanwei_lab_nonce") // No implicit reactivation after onStop or another onStart.
-        if (usbLabNonce != null || pairing.busy || consumedLabNonces.contains(requestedNonce)) {
+        if (usbLabNonce != null || pairing.busy || groupProbe.busy || groupProbe.retryLocked ||
+            DirectPairingSession.radioGate.occupied() || !fileTasksSettled() || consumedLabNonces.contains(requestedNonce)) {
             writeUsbLabStatus("activation_rejected", "busy_or_nonce_replayed")
             return
         }
@@ -1177,6 +1262,7 @@ class MainActivity : Activity() {
     companion object {
         private const val PERMISSION_REQUEST = 101
         private const val PAIR_PERMISSION_REQUEST = 103
+        private const val GROUP_PROBE_PERMISSION_REQUEST = 104
         private const val EXPORT_REQUEST = 102
         private const val PENDING_EXPORT_STATE = "pending_export_snapshot"
         // Shared for all Activity instances; shutdown/draining during rotation must not race the next instance.
