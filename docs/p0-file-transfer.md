@@ -1,10 +1,10 @@
 # P0 安全文件实验
 
-状态复核：2026-10-18；最新现场实验发生于2026-10-17。Windows / Android 0.3.1 分别通过 213 项和 30 项本地检查；Android 更新 APK 已安装，应用身份保持。**0.3.1 已完成双向固定夹具实测，每个方向各 1 MiB；0.3.2 开发版已完成普通界面的 Windows → Android 1 MiB 实测，接收端保存、COMPLETE 和独立磁盘哈希核验通过。** 0.3.2 反向尚未真正发起发送，连续重连、物理拔线与连续保网仍待验收。0.3.2 尚未发布，下载仍为 [0.3.1 预发布版](https://github.com/Arriving2024/wanwei/releases/tag/p0-0.3.1)。
+状态复核：2026-10-18；最新现场结果为手机自主空组检测，文件实验仍为2026-10-17。Windows / Android 0.3.1 分别通过 213 项和 30 项本地检查；Android 更新 APK 已安装，应用身份保持。**0.3.1 已完成双向固定夹具实测，每个方向各 1 MiB；0.3.2 开发版已完成普通界面的 Windows → Android 1 MiB 实测，接收端保存、COMPLETE 和独立磁盘哈希核验通过。** 0.3.2 反向尚未真正发起发送，连续重连、物理拔线与连续保网仍待验收。0.3.2 尚未发布，下载仍为 [0.3.1 预发布版](https://github.com/Arriving2024/wanwei/releases/tag/p0-0.3.1)。
 
 ## 本轮现场结果
 
-0.3.2 开发改动已通过 Windows 315 / Android 45 项本地检查。默认角色下由[独立 UDP 提示协议](../protocol/rendezvous.md)交换动态 TCP 端口，首次完整公钥信任及每次 OFFER 确认不变。Android 另外以本次已建立组的连续新鲜回读确认消失，保留取消协商返回的原始失败值；未建立、外来或未知组仍不得据此解除重试保护。
+0.3.2 文件实验基线通过 Windows 315 / Android 45 项本地检查；新增空组探针后Android本地检查为62项。默认角色下由[独立 UDP 提示协议](../protocol/rendezvous.md)交换动态 TCP 端口，首次完整公钥信任及每次 OFFER 确认不变。Android 另外以本次已建立组的连续新鲜回读确认消失，保留取消协商返回的原始失败值；未建立、外来或未知组仍不得据此解除重试保护。
 
 2026-10-17 使用普通界面完成原生配对，并在 Windows 为组主、Android 为客户端的连接内完成 Windows → Android 固定 1 MiB 收发：
 
@@ -31,13 +31,24 @@
 
 两轮均未执行持续互联网流量验证。第二轮拒绝断开原 WLAN 后没有建连，不能计为保网传输成功；也不能据此判定硬件仅有一个5 GHz接口、必须改用2.4 GHz，或所有 P2P 路径均不支持并发。第一轮仍只是同信道5 GHz共存样本。Windows 的资源释放只证明本应用对象释放，Android 组消失另由新鲜成对查询确认；二者不能互相替代。两轮限定程序和直连端点的临时防火墙规则已移除，独立检查确认 PersistentStore 与 ActiveStore 均无本轮规则。
 
-Android 0.3.2 开发版（build 11）已加入独立探测入口，仅请求创建本机2.4 GHz空组，不连接 Windows、不建立文件监听、不发送文件。2026-10-18 本地编译、Lint、62项测试（含17项新探针策略测试）和Debug APK v2签名校验通过，签名身份与旧版一致。本轮 APK 已通过覆盖安装，独立回读确认传输身份保留；新增界面已在荣耀真机查看。首次点击因系统定位关闭被前置检查拒绝，未调用建组、未修改 WLAN，等待持有人开启定位后再检测；不改变现有文件验收状态。
+Android 0.3.2 开发版（build 11）已加入独立探测入口，仅请求创建本机2.4 GHz空组，不连接 Windows、不建立文件监听、不发送文件。2026-10-18 本地编译、Lint、62项测试（含17项新探针策略测试）和Debug APK v2签名校验通过，签名身份与旧版一致。本轮 APK 已通过覆盖安装，独立回读确认传输身份保留。首次点击因系统定位关闭被前置检查拒绝；持有人随后授权控制开关并亲自解锁，临时开启定位后完成一次空组检测，结束后已恢复原来的关闭状态。
+
+| 本轮空组项目 | 原生报告与后续核验 |
+| --- | --- |
+| 建组 | 前置新鲜回读确认无现有组、原 AP 可识别；创建获准后13个组样本均为2412 MHz、本机组主、0客户端，匹配本轮随机组身份 |
+| 原 Wi-Fi | 原 AP 实际为2437 MHz，也是2.4 GHz；17个主 AP 样本身份一致、16个可比样本、无未知或变化样本，原网络在各样本中仍可见；无丢失或换 AP 事件，最大采样间隔1010 ms |
+| 观察与清理 | 完整观察10004 ms；删除前再次通过独立归属匹配，仅移除本次自有组。删除获准后4个新鲜缺席样本跨越2096 ms，`owned_group_removed_absence_verified`、`retryLocked=false`；无待决回调、身份污染或原生错误，观察回调、接收器和通道释放确认 |
+| 设置恢复 | 定位恢复为检测前的关闭状态并独立回读，恢复后 Wi-Fi仍显示已连接；没有修改 Wi-Fi开关或创建防火墙规则 |
+
+上述结果仅支持本机空2.4 GHz组与原2.4 GHz Wi-Fi在采样中的共存，以及本轮组清理。原5 GHz Wi-Fi搭配2.4 GHz直连、Windows加入、文件收发、持续互联网、物理拔线及多链路速度均未由此验证。本轮不改变已有文件验收状态。
+
+维护者自动读回曾因UTC时间被转成无时区字符串而误报等待超时；原超时回执已保留。原生报告实际早已结束，后续保留UTC的解析、原生样本与定位恢复回执共同确认了以上结果，没有重跑无线测试覆盖原记录。该问题位于本机取证脚本，不是新增的文件传输成功。
 
 手机连接原 Wi-Fi、万维保持前台且其他实验清理结束后，进入“兼容直连检测”卡片，点击“检测 2.4 GHz 独立直连”，再确认“开始本次检测”。需要附近设备和精确定位权限，后者仅用于核对原 AP；权限由设备持有人授予。若系统要求断开原 WLAN，请拒绝并停止本轮。报告中的 `standaloneGroupProbe` 与文件证据分开记录。
 
 探针先要求新鲜的“无现有组”成对回读和明确的原 Wi-Fi 基线；建组、观察、清理各有固定的10秒上限。只有建组确认、实际手机组主、2.4 GHz频率、随机组名匹配、空客户端和后续独立签名匹配同时满足时才允许清理；删除确认后仍需至少2秒的新鲜缺席回读。未知、额外参与者或未决回调会锁定后续无线实验，不删除原有或不明组。采样一致不证明持续上网，空组成功也不证明 Windows 能加入。
 
-这与在手机加入 Windows 组时设置频段不是同一件事：[Android `setGroupOperatingBand`](https://developer.android.com/reference/android/net/wifi/p2p/WifiP2pConfig.Builder#setGroupOperatingBand(int)) 在 `createGroup` 时限制本机创建组的可选频段，不能满足便失败；在客户端 `connect` 时限制扫描频段，不会命令远端组主切换频段。当前 Windows 使用的[公开连接参数](https://learn.microsoft.com/en-us/uwp/api/windows.devices.wifidirect.wifidirectconnectionparameters)提供组主意向及配对偏好，没有对应的频段设置；[自主组主开关](https://learn.microsoft.com/en-us/uwp/api/windows.devices.wifidirect.wifidirectadvertisement.isautonomousgroupownerenabled)本身也不是选频开关。因此下一步先验证手机独立建组能力，再决定是否设计新的两端连接方式，不能把请求参数当成实际并发或速度结果。
+这与在手机加入 Windows 组时设置频段不是同一件事：[Android `setGroupOperatingBand`](https://developer.android.com/reference/android/net/wifi/p2p/WifiP2pConfig.Builder#setGroupOperatingBand(int)) 在 `createGroup` 时限制本机创建组的可选频段，不能满足便失败；在客户端 `connect` 时限制扫描频段，不会命令远端组主切换频段。当前 Windows 使用的[公开连接参数](https://learn.microsoft.com/en-us/uwp/api/windows.devices.wifidirect.wifidirectconnectionparameters)提供组主意向及配对偏好，没有对应的频段设置；[自主组主开关](https://learn.microsoft.com/en-us/uwp/api/windows.devices.wifidirect.wifidirectadvertisement.isautonomousgroupownerenabled)本身也不是选频开关。手机本轮已验证一种本地建组组合，下一步需补测原5 GHz Wi-Fi组合及Windows加入方式，不能把请求参数当成实际并发或速度结果。
 
 2026-10-16 的 0.3.2 开发版新增现场证据：设备持有人及时接受普通界面的两次连接确认，Windows 系统配对为 `Paired`，双方观察到实际 Direct 连接；观察结束后，Windows 发布器及本应用资源释放已确认，Android 为 `established_connection_absent_confirmed`、`retryLocked=false`。手机原 AP 的160个采样点一致，无未知或变化样本，仍不证明连续互联网无中断。该轮没有启动文件传输，也没有新增防火墙规则；它仅验证这次原生建连和清理，不验证自动端口交换或连续投送。
 
