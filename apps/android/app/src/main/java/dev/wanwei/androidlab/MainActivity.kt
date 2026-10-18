@@ -15,6 +15,7 @@ import android.location.LocationManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
+import android.net.wifi.ScanResult
 import android.net.wifi.aware.WifiAwareManager
 import android.net.wifi.p2p.WifiP2pDevice
 import android.net.wifi.p2p.WifiP2pManager
@@ -84,6 +85,10 @@ class MainActivity : Activity() {
     private lateinit var stopGroupProbeButton: Button
     private lateinit var groupProbeText: TextView
     private var pendingGroupProbePermission = false
+    private lateinit var localHotspot: LocalHotspotSession
+    private lateinit var localHotspotButton: Button
+    private lateinit var stopLocalHotspotButton: Button
+    private lateinit var localHotspotText: TextView
     private lateinit var fileExperimentCheckBox: CheckBox
     private lateinit var localPinText: TextView
     private lateinit var transferStateText: TextView
@@ -179,6 +184,14 @@ class MainActivity : Activity() {
             }
             persistReport("group-probe", allowAfterDestroy = true)
         }
+        localHotspot = LocalHotspotSession(this) { message ->
+            if (!destroyed) {
+                if (message.isNotBlank() && ::localHotspotText.isInitialized) localHotspotText.text = message
+                updateButtons()
+            }
+            persistReport("local-hotspot", allowAfterDestroy = true)
+        }
+        HotspotLabBridge.attach(localHotspot)
         buildUi()
         pairing.beforeCleanup = { if (::transfer.isInitialized) transfer.cancel("DIRECT_PATH_UNVERIFIED") }
         prepareIdentity()
@@ -234,6 +247,7 @@ class MainActivity : Activity() {
         pendingPairPermission = false
         pendingGroupProbePermission = false
         groupProbe.cancel("lifecycle_cancelled")
+        localHotspot.cancel("lifecycle_cancelled")
         if (::transfer.isInitialized) transfer.cancel("CANCELLED")
         if (pairing.awaitingSystemNegotiation) pairing.noteLifecycle("activity_stopped_during_bounded_system_negotiation")
         else if (pairing.busy) pairing.cancel("activity_stopped")
@@ -249,6 +263,8 @@ class MainActivity : Activity() {
         if (::transfer.isInitialized) transfer.cancel("CANCELLED")
         pairing.cancel("activity_destroyed")
         groupProbe.cancel("lifecycle_cancelled")
+        localHotspot.cancel("lifecycle_cancelled")
+        HotspotLabBridge.detach(localHotspot)
         if (scanning) finishScan("activity_destroyed", "界面关闭，已结束本次扫描。")
         // A closing Activity cannot wait indefinitely for the platform's stop callback.
         if (stopping) {
@@ -338,6 +354,9 @@ class MainActivity : Activity() {
         query("staLocalOnlySupported", 31) { if (Build.VERSION.SDK_INT >= 31) wifi!!.isStaConcurrencyForLocalOnlyConnectionsSupported else false }
         query("staMultiInternetSupported", 33) { if (Build.VERSION.SDK_INT >= 33) wifi!!.isStaConcurrencyForMultiInternetSupported else false }
         query("makeBeforeBreakSupported", 31) { if (Build.VERSION.SDK_INT >= 31) wifi!!.isMakeBeforeBreakWifiSwitchingSupported else false }
+        query("wifi7StationSupported", 33) { if (Build.VERSION.SDK_INT >= 33) wifi!!.isWifiStandardSupported(ScanResult.WIFI_STANDARD_11BE) else false }
+        query("bridgedApSupported", 31) { if (Build.VERSION.SDK_INT >= 31) wifi!!.isBridgedApConcurrencySupported else false }
+        value.put("localHotspotMloVerified", false).put("directMloVerified", false)
         return value
     }
 
@@ -669,9 +688,11 @@ class MainActivity : Activity() {
         .put("scan", currentScan ?: JSONObject.NULL)
         .put("pairing", pairing.report() ?: JSONObject.NULL)
         .put("standaloneGroupProbe", groupProbe.report() ?: JSONObject.NULL)
+        .put("localHotspotExperiment", localHotspot.report() ?: JSONObject.NULL)
         .put("evidenceBoundary", JSONObject().put("capabilityProbeExecuted", true)
             .put("pairingImplemented", true).put("actualDirectConnectionObserved", pairing.report()?.optBoolean("actualConnectionObserved") ?: false)
             .put("standaloneGroupProbeIsFileTransferEvidence", false)
+            .put("localHotspotExperimentIsFileTransferEvidence", false)
             .put("applicationIdentityAuthenticated", false).put("fileTransferImplemented", true)
             .put("applicationTransferEvidence", "files/reports/latest-transfer.json")
             .put("originalWifiPreservationVerified", false).put("crossPlatformCompatibilityVerified", false)
@@ -817,7 +838,15 @@ class MainActivity : Activity() {
         groupProbeButton.id = R.id.group_probe_start
         stopGroupProbeButton = button(compatibility, "停止本轮检测") { groupProbe.cancel() }
         stopGroupProbeButton.id = R.id.group_probe_stop
-        val evidence = card("06  诊断记录")
+        val localWifi = card("06  高速直连实验")
+        addText(localWifi, "按需创建独立的 5 GHz 本地 Wi-Fi，电脑无需与手机连接同一路由器。本轮仅检查电脑接入与实际连接标准，不传文件、不共享手机互联网，也不保证 Wi-Fi 7 或 MLO。", 14f, muted, false, 12)
+        localHotspotText = addText(localWifi, "尚未开始。需要 Android 16 或以上；最多 120 秒，系统可能调整原 Wi-Fi。", 14f, Color.WHITE, false, 12)
+        localHotspotText.id = R.id.local_hotspot_state
+        localHotspotButton = button(localWifi, "创建 5 GHz 临时直连", true) { requestLocalHotspot() }
+        localHotspotButton.id = R.id.local_hotspot_start
+        stopLocalHotspotButton = button(localWifi, "结束本轮高速直连") { localHotspot.cancel("user_cancelled") }
+        stopLocalHotspotButton.id = R.id.local_hotspot_stop
+        val evidence = card("07  诊断记录")
         reportText = addText(evidence, "准备本机报告……", 13f, muted, false, 12)
         exportButton = button(evidence, "导出 JSON 报告") { exportReport() }
         exportButton.id = R.id.export_report
@@ -857,11 +886,11 @@ class MainActivity : Activity() {
     private fun updateButtons() {
         if (!::scanButton.isInitialized) return
         val idle = !scanning && !stopping && !pairing.busy && !pairing.retryLocked && !groupProbe.busy &&
-            !groupProbe.retryLocked && !DirectPairingSession.radioGate.occupied()
+            !groupProbe.retryLocked && !localHotspot.busy && !localHotspot.retryLocked && !DirectPairingSession.radioGate.occupied()
         scanButton.isEnabled = idle
-        probeButton.isEnabled = !scanning && !stopping && !pairing.busy && !groupProbe.busy
+        probeButton.isEnabled = !scanning && !stopping && !pairing.busy && !groupProbe.busy && !localHotspot.busy
         stopButton.isEnabled = scanning
-        exportButton.isEnabled = !scanning && !stopping && !pairing.busy && !groupProbe.busy
+        exportButton.isEnabled = !scanning && !stopping && !pairing.busy && !groupProbe.busy && !localHotspot.busy
         selectPeerButton.isEnabled = idle && livePeers.isNotEmpty()
         preferPhoneGoCheckBox.isEnabled = idle
         fileExperimentCheckBox.isEnabled = idle
@@ -870,6 +899,10 @@ class MainActivity : Activity() {
         if (::groupProbeButton.isInitialized) {
             groupProbeButton.isEnabled = idle && fileTasksSettled() && Build.VERSION.SDK_INT >= 29 && usbLabNonce == null
             stopGroupProbeButton.isEnabled = groupProbe.busy
+        }
+        if (::localHotspotButton.isInitialized) {
+            localHotspotButton.isEnabled = idle && fileTasksSettled() && Build.VERSION.SDK_INT >= 36 && usbLabNonce == null
+            stopLocalHotspotButton.isEnabled = localHotspot.busy
         }
         if (::receiveTestButton.isInitialized) {
             val transferring = ::transfer.isInitialized && transfer.busy
@@ -892,6 +925,7 @@ class MainActivity : Activity() {
         }
         if (DirectPairingSession.radioGate.locked()) pairingText.text = "上次系统释放未确认，当前进程已锁定新的扫描和连接。请先结束系统 Direct 连接并重新打开应用。"
         else if (groupProbe.busy) pairingText.text = "正在检测手机独立直连；本轮不连接电脑，请等待检测和清理结束。"
+        else if (localHotspot.busy) pairingText.text = "高速本地直连实验进行中；文件实验尚未开放，请先结束本轮。"
         else if (DirectPairingSession.radioGate.occupied() && !scanning && !stopping && !pairing.busy)
             pairingText.text = "上一页面的实验仍在清理，请等待结束后重试。"
     }
@@ -900,7 +934,28 @@ class MainActivity : Activity() {
 
     private fun groupProbeCanStart(): Boolean = started && !scanning && !stopping && !pairing.busy &&
         !pairing.retryLocked && !groupProbe.busy && !groupProbe.retryLocked &&
-        !DirectPairingSession.radioGate.occupied() && usbLabNonce == null && fileTasksSettled()
+        !localHotspot.busy && !localHotspot.retryLocked && !DirectPairingSession.radioGate.occupied() && usbLabNonce == null && fileTasksSettled()
+
+    private fun requestLocalHotspot() {
+        if (!groupProbeCanStart()) return
+        if (Build.VERSION.SDK_INT < 36) {
+            localHotspotText.text = "此项实验需要 Android 16 或以上。"
+            return
+        }
+        if (!hasDiscoveryPermission()) {
+            localHotspotText.text = "请先授予附近设备权限，再重新开始本轮实验。"
+            requestPermissions(discoveryPermissionRequest(), LOCAL_HOTSPOT_PERMISSION_REQUEST)
+            return
+        }
+        AlertDialog.Builder(this).setTitle("创建本次 5 GHz 临时直连？")
+            .setMessage("手机将创建独立的本地 Wi-Fi 供电脑接入，不提供互联网。系统可能调整原 Wi-Fi；本轮最多 120 秒，不传文件。离开页面或点结束会释放本次连接请求，实际连接标准以电脑回读为准，不保证 MLO。")
+            .setPositiveButton("创建本次直连") { _, _ ->
+                if (groupProbeCanStart() && hasDiscoveryPermission()) {
+                    localHotspot.start()
+                    updateButtons()
+                }
+            }.setNegativeButton("取消", null).show()
+    }
 
     private fun requestGroupProbe() {
         if (!groupProbeCanStart()) return
@@ -1108,7 +1163,7 @@ class MainActivity : Activity() {
         val requestedNonce = intent?.getStringExtra("wanwei_lab_nonce") ?: return
         if (!::identity.isInitialized || !::transfer.isInitialized || confirmedPeerPin == null) return
         intent.removeExtra("wanwei_lab_nonce") // No implicit reactivation after onStop or another onStart.
-        if (usbLabNonce != null || pairing.busy || groupProbe.busy || groupProbe.retryLocked ||
+        if (usbLabNonce != null || pairing.busy || groupProbe.busy || groupProbe.retryLocked || localHotspot.busy || localHotspot.retryLocked ||
             DirectPairingSession.radioGate.occupied() || !fileTasksSettled() || consumedLabNonces.contains(requestedNonce)) {
             writeUsbLabStatus("activation_rejected", "busy_or_nonce_replayed")
             return
@@ -1263,6 +1318,7 @@ class MainActivity : Activity() {
         private const val PERMISSION_REQUEST = 101
         private const val PAIR_PERMISSION_REQUEST = 103
         private const val GROUP_PROBE_PERMISSION_REQUEST = 104
+        private const val LOCAL_HOTSPOT_PERMISSION_REQUEST = 105
         private const val EXPORT_REQUEST = 102
         private const val PENDING_EXPORT_STATE = "pending_export_snapshot"
         // Shared for all Activity instances; shutdown/draining during rotation must not race the next instance.

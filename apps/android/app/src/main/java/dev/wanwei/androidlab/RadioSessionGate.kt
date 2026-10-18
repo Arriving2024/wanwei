@@ -17,4 +17,6 @@ internal class RadioSessionGate {
     }
     @Synchronized fun occupied(): Boolean = owner != null
     @Synchronized fun locked(): Boolean = uncertain
+    /** A late callback can taint the process without taking or releasing another owner's lease. */
+    @Synchronized fun latchUncertain() { uncertain = true }
 }

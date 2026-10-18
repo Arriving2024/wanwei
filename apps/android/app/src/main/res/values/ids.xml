@@ -25,4 +25,7 @@
     <item name="group_probe_state" type="id" />
     <item name="group_probe_start" type="id" />
     <item name="group_probe_stop" type="id" />
+    <item name="local_hotspot_state" type="id" />
+    <item name="local_hotspot_start" type="id" />
+    <item name="local_hotspot_stop" type="id" />
 </resources>

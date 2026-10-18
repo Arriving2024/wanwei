@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory=$true)]
-    [ValidateSet('TrustPeer','PrepareSender','PrepareSend','PrepareReceive','PrepareGroupProbe','StartGroupProbe','StopGroupProbe','SetDestination','Send','Receive','Accept','Reject','Cancel')][string]$Action,
+    [ValidateSet('TrustPeer','PrepareSender','PrepareSend','PrepareReceive','PrepareGroupProbe','StartGroupProbe','StopGroupProbe','PrepareLocalHotspot','StartLocalHotspot','StopLocalHotspot','SetDestination','Send','Receive','Accept','Reject','Cancel')][string]$Action,
     [string]$PeerFingerprint,
     [string]$PeerAddress,
     [int]$PeerPort
@@ -13,6 +13,7 @@ function Invoke-P0UiAdb([string[]]$Parts) {
     foreach ($part in $Parts) { if ($part -notmatch '^[A-Za-z0-9/_.-]+$') { throw 'Unexpected UI argument.' } }
     $process = [Diagnostics.Process]::new()
     $process.StartInfo.FileName = $wanweiAdb
+    $process.StartInfo.EnvironmentVariables['ADB_LIBUSB'] = '1'
     $process.StartInfo.Arguments = (@('-d') + $Parts) -join ' '
     $process.StartInfo.UseShellExecute = $false
     $process.StartInfo.CreateNoWindow = $true
@@ -125,6 +126,18 @@ switch ($Action) {
         Tap-P0Node ($ui.SelectSingleNode("//node[@package='$wanweiPackage' and @resource-id='android:id/button1' and @text='开始本次检测']"))
     }
     'StopGroupProbe' { Tap-P0Node (Find-P0Control 'group_probe_stop') }
+    'PrepareLocalHotspot' {
+        if ((Find-P0Control 'local_hotspot_start').enabled -ne 'true') { throw 'Local Wi-Fi lab is unavailable; no network was created.' }
+    }
+    'StartLocalHotspot' {
+        Tap-P0Node (Find-P0Control 'local_hotspot_start')
+        $ui = Read-P0Ui
+        if ($null -eq $ui.SelectSingleNode("//node[@package='$wanweiPackage' and @text='创建本次 5 GHz 临时直连？']")) {
+            throw 'Expected local Wi-Fi lab confirmation is absent; no other prompt will be accepted.'
+        }
+        Tap-P0Node ($ui.SelectSingleNode("//node[@package='$wanweiPackage' and @resource-id='android:id/button1' and @text='创建本次直连']"))
+    }
+    'StopLocalHotspot' { Tap-P0Node (Find-P0Control 'local_hotspot_stop') }
     'TrustPeer' {
         if ($PeerFingerprint -notmatch '^[0-9a-f]{64}$') { throw 'A verified full lowercase fingerprint is required.' }
         Set-P0Text 'transfer_peer_pin' $PeerFingerprint
@@ -145,10 +158,12 @@ switch ($Action) {
     }
 }
 $null = Read-P0Ui
-if ($Action -in @('PrepareSend','PrepareReceive','PrepareGroupProbe')) {
+if ($Action -in @('PrepareSend','PrepareReceive','PrepareGroupProbe','PrepareLocalHotspot')) {
     Write-Output "Visible Wanwei P0 preparation completed: $Action. No transfer was started."
 } elseif ($Action -in @('StartGroupProbe','StopGroupProbe')) {
     Write-Output "Visible standalone group probe action completed: $Action. Inspect standaloneGroupProbe in the fresh group-probe report; this is not file-transfer evidence."
+} elseif ($Action -in @('StartLocalHotspot','StopLocalHotspot')) {
+    Write-Output "Visible local Wi-Fi lab action completed: $Action. Read the local-hotspot report; this is not file or MLO evidence."
 } else {
     Write-Output "Visible Wanwei P0 action completed: $Action. Inspect the fresh transfer report for actual results."
 }

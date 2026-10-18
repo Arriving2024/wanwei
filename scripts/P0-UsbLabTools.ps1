@@ -7,6 +7,7 @@ function Invoke-P0LabAdb {
     param([Parameter(Mandatory)][string[]]$Parts, [string]$InputJson, [int]$TimeoutMs = 15000)
     $process = [Diagnostics.Process]::new()
     $process.StartInfo.FileName = $wanweiP0Adb
+    $process.StartInfo.EnvironmentVariables['ADB_LIBUSB'] = '1'
     $process.StartInfo.ArgumentList.Add('-d')
     foreach ($part in $Parts) { $process.StartInfo.ArgumentList.Add($part) }
     $process.StartInfo.UseShellExecute = $false

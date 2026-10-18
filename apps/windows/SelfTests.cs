@@ -18,6 +18,7 @@ internal static class SelfTests
         Check("WLAN_ASSOCIATION_ATTRIBUTES layout", Marshal.SizeOf<NativeWlan.Association>() == 68);
         Check("WLAN_CONNECTION_ATTRIBUTES layout", Marshal.SizeOf<NativeWlan.Connection>() == 604);
         Check("BSSID offset", Marshal.OffsetOf<NativeWlan.Association>(nameof(NativeWlan.Association.Bssid)).ToInt32() == 40);
+        LocalWifiPolicy(Check);
         Check("netsh UTF8 on Chinese Windows", ProbeRunner.DecodeNetsh(Encoding.UTF8.GetBytes("无线：支持"), 936) == "无线：支持");
         Check("netsh OEM936 fallback", ProbeRunner.DecodeNetsh(Encoding.GetEncoding(936).GetBytes("无线：支持"), 936) == "无线：支持");
         Check("one sample is inconclusive", Continuity.Evaluate([Sample("ap")]) == "unknown");
@@ -175,6 +176,113 @@ internal static class SelfTests
         P0SelfTests.Run(Check);
         Console.WriteLine($"{passed} local checks passed including authenticated TLS loopback. No radio interoperability was tested by these checks.");
         return 0;
+    }
+
+    private static void LocalWifiPolicy(Action<string, bool> check)
+    {
+        // Pure host checks only: no client factory, handle, scan, or radio operation.
+        bool Reject(Action action, string code)
+        {
+            try { action(); return false; }
+            catch (LocalWifiClientException error) { return error.Code == code && error.InnerException is null; }
+        }
+        bool Accept(Action action)
+        {
+            try { action(); return true; }
+            catch (LocalWifiClientException) { return false; }
+        }
+        const string ssid = "Local host policy fixture";
+        const string passphrase = "fixture-only-123";
+        check("Local WiFi native structures match Windows ABI without a WLAN handle", LocalWifiNative.AbiLayoutIsValid());
+        check("Local WiFi WPA2 request accepted", Accept(() => LocalWifiClientPolicy.ValidateRequest(ssid, passphrase, 1)));
+        check("Local WiFi transition network permits explicit WPA2 baseline", Accept(() => LocalWifiClientPolicy.ValidateRequest(ssid, passphrase, 2)));
+        check("Local WiFi pure WPA3 cannot silently downgrade", Reject(() => LocalWifiClientPolicy.ValidateRequest(ssid, passphrase, 3), "LOCAL_WIFI_PURE_WPA3_UNSUPPORTED"));
+        foreach (int security in new[] { 0, -1, 4, int.MaxValue })
+            check("Local WiFi open or unknown security rejected " + security,
+                Reject(() => LocalWifiClientPolicy.ValidateRequest(ssid, passphrase, security), "LOCAL_WIFI_SECURITY_UNSUPPORTED"));
+        check("Local WiFi ASCII SSID at 32 byte boundary accepted", LocalWifiClientPolicy.EncodeSsid(new string('a', 32)).Length == 32);
+        check("Local WiFi Unicode SSID uses its UTF8 byte boundary", LocalWifiClientPolicy.EncodeSsid(new string('中', 10) + "ab").Length == 32);
+        foreach (string? invalidSsid in new string?[] { null, "", new string('a', 33), new string('中', 11), "\ud800", "\udc00" })
+            check("Local WiFi missing oversized or malformed SSID rejected",
+                Reject(() => LocalWifiClientPolicy.EncodeSsid(invalidSsid!), "LOCAL_WIFI_INVALID_SSID"));
+        check("Local WiFi 8 character passphrase boundary accepted", Accept(() => LocalWifiClientPolicy.ValidateRequest(ssid, new string('a', 8), 1)));
+        check("Local WiFi 63 character passphrase boundary accepted", Accept(() => LocalWifiClientPolicy.ValidateRequest(ssid, new string('a', 63), 1)));
+        check("Local WiFi printable ASCII spaces retain exact passphrase", Accept(() => LocalWifiClientPolicy.ValidateRequest(ssid, " abcdef ", 1)));
+        foreach (string? invalidPassphrase in new string?[] { null, "", new string('a', 7), new string('a', 64), "fixture\nkey", "fixture\0key", "fixture\u007fkey", "fixture中key" })
+            check("Local WiFi malformed passphrase or unsupported raw key rejected",
+                Reject(() => LocalWifiClientPolicy.ValidateRequest(ssid, invalidPassphrase!, 1), "LOCAL_WIFI_INVALID_PASSPHRASE"));
+
+        check("Local WiFi sole connected adapter with an existing profile is eligible",
+            Accept(() => LocalWifiClientPolicy.ValidateBaseline(1, 1, true)));
+        check("Local WiFi connected baseline without restoration profile rejected",
+            Reject(() => LocalWifiClientPolicy.ValidateBaseline(1, 1, false), "LOCAL_WIFI_BASELINE_NOT_RESTORABLE"));
+        check("Local WiFi disconnected baseline requires explicit opt in",
+            Reject(() => LocalWifiClientPolicy.ValidateBaseline(1, 4, false), "LOCAL_WIFI_DISCONNECTED_BASELINE_REQUIRES_OPT_IN"));
+        check("Local WiFi explicit disconnected baseline accepted",
+            Accept(() => LocalWifiClientPolicy.ValidateBaseline(1, 4, false, true)));
+        foreach (int count in new[] { 0, 2, 3 })
+            check("Local WiFi adapter ambiguity fails before a connection request " + count,
+                Reject(() => LocalWifiClientPolicy.ValidateBaseline(count, 1, true, true),
+                    count == 0 ? "LOCAL_WIFI_NO_INTERFACE" : "LOCAL_WIFI_MULTIPLE_INTERFACES"));
+        foreach (uint state in new uint[] { 0, 2, 3, 5, 6, 7, uint.MaxValue })
+            check("Local WiFi unstable interface cannot use disconnected opt in " + state,
+                Reject(() => LocalWifiClientPolicy.ValidateBaseline(1, state, true, true), "LOCAL_WIFI_INTERFACE_NOT_STABLE"));
+
+        check("Local WiFi exact temporary WPA2 CCMP infrastructure attributes accepted",
+            Accept(() => LocalWifiClientPolicy.RequireSecureTemporaryConnection(1, true, false, 7, 4, 1)));
+        foreach (uint mode in new uint[] { 0, 2, 3, 4, 5, uint.MaxValue })
+            check("Local WiFi non temporary observed mode cannot pass " + mode,
+                Reject(() => LocalWifiClientPolicy.RequireSecureTemporaryConnection(mode, true, false, 7, 4, 1), "LOCAL_WIFI_TEMPORARY_MODE_NOT_OBSERVED"));
+        foreach (var observed in new[] {
+            (Secure: false, OneX: false, Auth: 7u, Cipher: 4u, Bss: 1u),
+            (Secure: true, OneX: true, Auth: 7u, Cipher: 4u, Bss: 1u),
+            (Secure: true, OneX: false, Auth: 1u, Cipher: 4u, Bss: 1u),
+            (Secure: true, OneX: false, Auth: 9u, Cipher: 4u, Bss: 1u),
+            (Secure: true, OneX: false, Auth: 7u, Cipher: 0u, Bss: 1u),
+            (Secure: true, OneX: false, Auth: 7u, Cipher: 2u, Bss: 1u),
+            (Secure: true, OneX: false, Auth: 7u, Cipher: 4u, Bss: 2u) })
+            check("Local WiFi insecure enterprise unexpected cipher or ad hoc observation rejected",
+                Reject(() => LocalWifiClientPolicy.RequireSecureTemporaryConnection(1, observed.Secure,
+                    observed.OneX, observed.Auth, observed.Cipher, observed.Bss), "LOCAL_WIFI_SECURE_BASELINE_NOT_OBSERVED"));
+
+        byte[] requested = Encoding.UTF8.GetBytes("原样网络");
+        check("Local WiFi SSID match compares complete original bytes", LocalWifiClientPolicy.SsidEquals(requested, requested));
+        check("Local WiFi prefix cannot satisfy exact SSID", !LocalWifiClientPolicy.SsidEquals(requested, requested[..^1]));
+        check("Local WiFi unrelated equal length SSID cannot satisfy target", !LocalWifiClientPolicy.SsidEquals([1, 2, 3], [1, 2, 4]));
+        check("Local WiFi missing SSID cannot match missing requested SSID", !LocalWifiClientPolicy.SsidEquals([], []));
+
+        const string escapedSsid = "中<&\"'网络";
+        const string escapedPassphrase = "x</keyMaterial><evil/>";
+        System.Xml.Linq.XNamespace ns = "http://www.microsoft.com/networking/WLAN/profile/v1";
+        foreach (int security in new[] { 1, 2 })
+        {
+            string xml = LocalWifiClientPolicy.BuildTemporaryProfileXml(escapedSsid, escapedPassphrase, security);
+            var document = System.Xml.Linq.XDocument.Parse(xml);
+            var root = document.Root!;
+            var network = root.Element(ns + "SSIDConfig")!.Element(ns + "SSID")!;
+            var protection = root.Element(ns + "MSM")!.Element(ns + "security")!;
+            var auth = protection.Element(ns + "authEncryption")!;
+            var sharedKey = protection.Element(ns + "sharedKey")!;
+            check("Local WiFi XML has the Windows profile schema " + security, root.Name == ns + "WLANProfile");
+            check("Local WiFi XML preserves special and Unicode SSID bytes " + security,
+                network.Elements().Count() == 1 && Convert.FromHexString(network.Element(ns + "hex")!.Value).SequenceEqual(Encoding.UTF8.GetBytes(escapedSsid)));
+            check("Local WiFi XML cannot inject a key child element " + security,
+                sharedKey.Element(ns + "keyMaterial")!.Value == escapedPassphrase && !document.Descendants().Any(x => x.Name.LocalName == "evil") && sharedKey.Elements().Count() == 3);
+            check("Local WiFi XML explicitly requests WPA2 AES without OneX " + security,
+                auth.Element(ns + "authentication")!.Value == "WPA2PSK" && auth.Element(ns + "encryption")!.Value == "AES" && auth.Element(ns + "useOneX")!.Value == "false");
+            check("Local WiFi XML carries an in memory passphrase and manual ESS mode " + security,
+                sharedKey.Element(ns + "keyType")!.Value == "passPhrase" && sharedKey.Element(ns + "protected")!.Value == "false" &&
+                root.Element(ns + "connectionType")!.Value == "ESS" && root.Element(ns + "connectionMode")!.Value == "manual");
+            check("Local WiFi XML temporary profile name does not reveal requested SSID " + security,
+                root.Element(ns + "name")!.Value == "Wanwei-LocalWifi-Temporary" && !xml.Contains(escapedSsid, StringComparison.Ordinal));
+        }
+        const string invalidSecret = "private\ncredential";
+        try { LocalWifiClientPolicy.ValidateRequest(ssid, invalidSecret, 1); check("Local WiFi credential validation produces a redacted exception", false); }
+        catch (LocalWifiClientException error)
+        {
+            check("Local WiFi credential validation produces a redacted exception", error.Code == "LOCAL_WIFI_INVALID_PASSPHRASE" &&
+                error.InnerException is null && !error.ToString().Contains(invalidSecret, StringComparison.Ordinal) && !error.Message.Contains(ssid, StringComparison.Ordinal));
+        }
     }
 
     private sealed class RejectingUi : IPairingUi
