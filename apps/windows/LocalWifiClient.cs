@@ -105,6 +105,72 @@ internal sealed class LocalWifiClient : IDisposable, IAsyncDisposable
         finally { operationGate.Release(); }
     }
 
+    internal async Task<P0Path> CreateFixturePathAsync(CancellationToken cancellationToken = default)
+    {
+        // Association can precede DHCP. Poll only this owned adapter for five
+        // seconds; never substitute a default route or another interface.
+        var elapsed = Stopwatch.StartNew();
+        while (true)
+        {
+            await operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                RequireFixtureAssociation();
+                var adapter = NetworkInterface.GetAllNetworkInterfaces().SingleOrDefault(n =>
+                    Guid.TryParse(n.Id, out var id) && id == interfaceId && n.OperationalStatus == OperationalStatus.Up);
+                if (adapter is not null)
+                {
+                    var ip = adapter.GetIPProperties();
+                    var endpoint = LocalWifiFixturePathPolicy.Select(interfaceId, ip.GetIPv4Properties().Index,
+                        ip.UnicastAddresses.Where(a => a.Address.AddressFamily == AddressFamily.InterNetwork)
+                            .Select(a => new LocalWifiFixtureAddress(a.Address, a.PrefixLength)).ToArray(),
+                        ip.GatewayAddresses.Select(g => g.Address).Where(a => a.AddressFamily == AddressFamily.InterNetwork).ToArray());
+                    return P0Path.CreateLocalHotspot(this, endpoint);
+                }
+            }
+            catch (LocalWifiClientException error) when (error.Code == "LOCAL_WIFI_FIXTURE_DHCP_NOT_READY" && elapsed.Elapsed < TimeSpan.FromSeconds(5)) { }
+            finally { operationGate.Release(); }
+            if (elapsed.Elapsed >= TimeSpan.FromSeconds(5)) throw new LocalWifiClientException("LOCAL_WIFI_FIXTURE_DHCP_NOT_READY");
+            await Task.Delay(250, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private void RequireFixtureAssociation()
+    {
+        if (Restoration is not null || !connectionRequestIssued || handle.IsClosed || handle.IsInvalid)
+            throw new LocalWifiClientException("LOCAL_WIFI_SESSION_CLOSED");
+        LocalWifiClientPolicy.RequireSingleInterface(LocalWifiNative.Interfaces(handle).Count);
+        var current = LocalWifiNative.Current(handle, interfaceId);
+        if (current is not { State: 1 } || !LocalWifiClientPolicy.SsidEquals(current.Value.Ssid, requestedSsid))
+            throw new LocalWifiClientException("LOCAL_WIFI_ASSOCIATION_LOST");
+        LocalWifiClientPolicy.RequireSecureTemporaryConnection(current.Value.Mode, current.Value.SecurityEnabled != 0,
+            current.Value.OneXEnabled != 0, current.Value.AuthAlgorithm, current.Value.CipherAlgorithm, current.Value.BssType);
+    }
+
+    internal bool VerifyFixturePath(LocalWifiFixtureEndpoint expected)
+    {
+        // The TLS writer and terminal reader may verify concurrently. Briefly
+        // serialize metadata queries instead of treating ordinary contention as
+        // loss of the native association. Restoration still causes a bounded failure.
+        if (!operationGate.Wait(TimeSpan.FromSeconds(1))) return false;
+        try
+        {
+            if (expected.InterfaceId != interfaceId) return false;
+            RequireFixtureAssociation();
+            var adapter = NetworkInterface.GetAllNetworkInterfaces().SingleOrDefault(n =>
+                Guid.TryParse(n.Id, out var id) && id == interfaceId && n.OperationalStatus == OperationalStatus.Up);
+            if (adapter is null) return false;
+            var ip = adapter.GetIPProperties();
+            var current = LocalWifiFixturePathPolicy.Select(interfaceId, ip.GetIPv4Properties().Index,
+                ip.UnicastAddresses.Where(a => a.Address.AddressFamily == AddressFamily.InterNetwork)
+                    .Select(a => new LocalWifiFixtureAddress(a.Address, a.PrefixLength)).ToArray(),
+                ip.GatewayAddresses.Select(g => g.Address).Where(a => a.AddressFamily == AddressFamily.InterNetwork).ToArray());
+            return current == expected;
+        }
+        catch { return false; }
+        finally { operationGate.Release(); }
+    }
+
     private void CaptureBaseline(bool allowDisconnectedBaseline)
     {
         var interfaces = LocalWifiNative.Interfaces(handle);
@@ -233,6 +299,35 @@ internal sealed class LocalWifiClient : IDisposable, IAsyncDisposable
     public void Dispose() => RestoreAsync().GetAwaiter().GetResult();
     public async ValueTask DisposeAsync() => await RestoreAsync().ConfigureAwait(false);
     public override string ToString() => "LocalWifiClient (credentials and network identity redacted)";
+}
+
+internal sealed record LocalWifiFixtureAddress(IPAddress Address, int PrefixLength);
+internal sealed record LocalWifiFixtureEndpoint(IPAddress Local, IPAddress Remote, int PrefixLength, Guid InterfaceId, int InterfaceIndex);
+
+internal static class LocalWifiFixturePathPolicy
+{
+    internal static LocalWifiFixtureEndpoint Select(Guid interfaceId, int interfaceIndex,
+        IReadOnlyList<LocalWifiFixtureAddress> addresses, IReadOnlyList<IPAddress> gateways)
+    {
+        if (interfaceId == Guid.Empty || interfaceIndex <= 0) throw new LocalWifiClientException("LOCAL_WIFI_FIXTURE_INTERFACE_INVALID");
+        if (addresses.Count == 0 || gateways.Count == 0) throw new LocalWifiClientException("LOCAL_WIFI_FIXTURE_DHCP_NOT_READY");
+        if (addresses.Count != 1 || gateways.Count != 1) throw new LocalWifiClientException("LOCAL_WIFI_FIXTURE_ENDPOINT_AMBIGUOUS");
+        var local = addresses[0]; var remote = gateways[0];
+        if (local.PrefixLength is < 1 or > 30 || !Usable(local.Address) || !Usable(remote) || local.Address.Equals(remote))
+            throw new LocalWifiClientException("LOCAL_WIFI_FIXTURE_ENDPOINT_INVALID");
+        uint a = Number(local.Address), b = Number(remote), mask = uint.MaxValue << (32 - local.PrefixLength);
+        uint network = a & mask, broadcast = network | ~mask;
+        if ((b & mask) != network || a == network || a == broadcast || b == network || b == broadcast)
+            throw new LocalWifiClientException("LOCAL_WIFI_FIXTURE_GATEWAY_OUTSIDE_SUBNET");
+        return new(local.Address, remote, local.PrefixLength, interfaceId, interfaceIndex);
+    }
+    private static bool Usable(IPAddress address)
+    {
+        if (address.AddressFamily != AddressFamily.InterNetwork || IPAddress.IsLoopback(address)) return false;
+        byte[] bytes = address.GetAddressBytes();
+        return bytes[0] is > 0 and < 224 && !(bytes[0] == 169 && bytes[1] == 254);
+    }
+    private static uint Number(IPAddress address) => System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(address.GetAddressBytes());
 }
 
 // These records intentionally have no SSID, BSSID, adapter GUID/name, profile, or key.

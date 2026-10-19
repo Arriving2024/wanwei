@@ -27,15 +27,25 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import javax.net.ssl.SSLSocket
 
-internal data class P0DirectPath(val evidenceId: String, val interfaceName: String, val localAddress: String,
-    val prefixLength: Int, val groupOwnerAddress: String, val localIsOwner: Boolean, val signature: String,
-    val observedAtElapsedMs: Long)
+internal sealed interface P0TransferPath {
+    val evidenceId: String
+    val interfaceName: String
+    val localAddress: String
+    val signature: String
+    val observedAtElapsedMs: Long
+}
+internal data class P0DirectPath(override val evidenceId: String, override val interfaceName: String, override val localAddress: String,
+    val prefixLength: Int, val groupOwnerAddress: String, val localIsOwner: Boolean, override val signature: String,
+    override val observedAtElapsedMs: Long) : P0TransferPath
+internal data class P0LocalHotspotPath(override val evidenceId: String, override val interfaceName: String,
+    override val localAddress: String, val prefixLength: Int, val exactPeerAddress: String, val sessionId: String,
+    override val signature: String, override val observedAtElapsedMs: Long) : P0TransferPath
 internal data class P0TransferUpdate(val state: String, val message: String, val listenPort: Int? = null,
     val offerPending: Boolean = false, val finished: Boolean = false)
 
 /** Only the worker mutates its report. Main looper receives immutable snapshots and user decisions. */
 internal class P0TransferSession(context: Context, private val identity: P0Identity,
-    private val pathProvider: () -> P0DirectPath?, private val changed: (P0TransferUpdate) -> Unit) {
+    private val pathProvider: () -> P0TransferPath?, private val changed: (P0TransferUpdate) -> Unit) {
     private val app = context.applicationContext
     private val localPin = identity.fingerprint
     private val active = AtomicBoolean(false)
@@ -43,6 +53,7 @@ internal class P0TransferSession(context: Context, private val identity: P0Ident
     private val socket = AtomicReference<Socket?>(null)
     private val listener = AtomicReference<ServerSocket?>(null)
     private val rendezvous = AtomicReference<P0Rendezvous.Responder?>(null)
+    private val reportSnapshot = AtomicReference<String?>(null)
     @Volatile private var cleanupLocked = false
     private enum class OfferConsent { USER_ACCEPTED, USER_DECLINED, OPERATOR_PREAUTHORIZED }
     private val offerDecision = AtomicReference<CompletableFuture<OfferConsent>?>(null)
@@ -50,6 +61,7 @@ internal class P0TransferSession(context: Context, private val identity: P0Ident
     @Volatile private var absoluteDeadline = 0L
     val busy: Boolean get() = active.get()
     val retryLocked: Boolean get() = cleanupLocked
+    fun report(): JSONObject? = reportSnapshot.get()?.let(::JSONObject)
     fun acceptOffer(accept: Boolean) { offerDecision.get()?.complete(if (accept) OfferConsent.USER_ACCEPTED else OfferConsent.USER_DECLINED) }
     fun acceptFixedFixtureByOperator(): Boolean = offerDecision.get()?.complete(OfferConsent.OPERATOR_PREAUTHORIZED) ?: false
     fun cancel(reason: String = "CANCELLED") {
@@ -62,8 +74,11 @@ internal class P0TransferSession(context: Context, private val identity: P0Ident
     fun startReceiver(peerPin: String, operatorPreauthorized: Boolean = false, automaticPortExchange: Boolean = false) = start("receiver", peerPin, null, null, operatorPreauthorized, automaticPortExchange)
     fun startSender(peerPin: String, peerAddress: String, port: Int, operatorPreauthorized: Boolean = false) = start("sender", peerPin, peerAddress, port, operatorPreauthorized, false)
     fun startSenderAutomatically(peerPin: String) = start("sender", peerPin, null, null, false, true)
+    fun startLocalHotspotFixture(peerPin: String, receiver: Boolean, operatorPreauthorized: Boolean = true) =
+        start(if (receiver) "receiver" else "sender", peerPin, null, null, operatorPreauthorized, false, true)
 
-    private fun start(role: String, peerPin: String, peerAddress: String?, port: Int?, operatorPreauthorized: Boolean, automaticPortExchange: Boolean) {
+    private fun start(role: String, peerPin: String, peerAddress: String?, port: Int?, operatorPreauthorized: Boolean,
+                      automaticPortExchange: Boolean, localHotspotFixture: Boolean = false) {
         if (cleanupLocked) return
         if (!active.compareAndSet(false, true)) return
         cancelled.set(null)
@@ -79,7 +94,11 @@ internal class P0TransferSession(context: Context, private val identity: P0Ident
                 .put("savedLocally", false).put("peerSaveConfirmed", false).put("bytesTransferred", 0)
                 .put("fileSyncSucceeded", false).put("renameSucceeded", false).put("directorySyncSucceeded", false)
                 .put("operatorFixturePreauthorized", operatorPreauthorized).put("userAcceptedOffer", false)
-                .put("preauthorizationSource", if (operatorPreauthorized) "debug_private_file_usb_lab" else JSONObject.NULL)
+                .put("preauthorizationSource", if (operatorPreauthorized) { if (localHotspotFixture) "debug_shell_memory_fixed_fixture_consent" else "debug_private_file_usb_lab" } else JSONObject.NULL)
+                .put("tcpRole", if (localHotspotFixture || role == "receiver") "server" else "client")
+                .put("tlsRole", if (localHotspotFixture || role == "receiver") "server" else "client")
+                .put("endpointSource", if (localHotspotFixture) "shell_assisted_native_dhcp_gateway_and_unique_new_android_ipv4_interface" else "native_wifi_direct")
+                .put("debugLocalHotspotFixture", localHotspotFixture)
                 .put("sessionResumptionPolicy", "fresh_SSLContext_once_session_tickets_disabled_no_early_application_data")
             var hintResponder: P0Rendezvous.Responder? = null
             var hintClosed = true
@@ -143,17 +162,27 @@ internal class P0TransferSession(context: Context, private val identity: P0Ident
             }
             try {
                 if (Build.VERSION.SDK_INT < 29) P0Protocol.fail("INVALID_MESSAGE")
+                if (localHotspotFixture && (!BuildConfig.DEBUG ||
+                        (app.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) == 0 ||
+                        !operatorPreauthorized || automaticPortExchange)) P0Protocol.fail("INVALID_MESSAGE")
                 if (!P0Protocol.fingerprint.matches(peerPin)) P0Protocol.fail("IDENTITY_MISMATCH")
                 ensureCurrent(initialPath)
                 val path = initialPath ?: P0Protocol.fail("DIRECT_PATH_UNVERIFIED")
-                if (automaticPortExchange && path.localIsOwner) P0Protocol.fail("AUTOMATIC_ROLE_UNSUPPORTED")
-                report.put("directEvidenceId", path.evidenceId).put("interfaceName", path.interfaceName)
-                    .put("nativeLocalAddress", path.localAddress).put("nativeGroupOwnerAddress", path.groupOwnerAddress)
-                    .put("directPathVerified", true).put("portExchange", if (automaticPortExchange) "native_unicast_udp_hint_then_pinned_tls13" else "manual_out_of_band_lab_parameters")
+                val direct = path as? P0DirectPath
+                val hotspot = path as? P0LocalHotspotPath
+                if (localHotspotFixture != (hotspot != null)) P0Protocol.fail("DIRECT_PATH_UNVERIFIED")
+                if (automaticPortExchange && (direct == null || direct.localIsOwner)) P0Protocol.fail("AUTOMATIC_ROLE_UNSUPPORTED")
+                report.put("interfaceName", path.interfaceName).put("nativeLocalAddress", path.localAddress)
+                    .put("directPathVerified", direct != null).put("localHotspotPathVerified", hotspot != null)
+                    .put("portExchange", if (localHotspotFixture) "debug_shell_memory_bound_listener_port" else if (automaticPortExchange) "native_unicast_udp_hint_then_pinned_tls13" else "manual_out_of_band_lab_parameters")
                     .put("portHintEstablishesIdentity", false)
+                if (direct != null) report.put("directEvidenceId", direct.evidenceId).put("nativeGroupOwnerAddress", direct.groupOwnerAddress)
+                if (hotspot != null) report.put("localHotspotSessionId", hotspot.sessionId)
+                    .put("localHotspotEvidenceId", hotspot.evidenceId).put("exactPeerAddress", hotspot.exactPeerAddress)
+                    .put("ordinaryProductEndpointDiscoveryVerified", false)
                 val local = ipv4(path.localAddress)
                 val raw: Socket
-                if (role == "receiver") {
+                if (localHotspotFixture || role == "receiver") {
                     val server = ServerSocket()
                     listener.set(server)
                     server.reuseAddress = false
@@ -161,7 +190,7 @@ internal class P0TransferSession(context: Context, private val identity: P0Ident
                     server.soTimeout = 30_000
                     report.put("listenerAddress", local.hostAddress).put("listenerPort", server.localPort)
                     if (automaticPortExchange) {
-                        hintResponder = P0Rendezvous.respond(local, ipv4(path.groupOwnerAddress), localPin, peerPin, server.localPort) { ensureCurrent(initialPath) }
+                        hintResponder = P0Rendezvous.respond(local, ipv4(direct!!.groupOwnerAddress), localPin, peerPin, server.localPort) { ensureCurrent(initialPath) }
                         rendezvous.set(hintResponder)
                         hintClosed = false
                     }
@@ -170,10 +199,10 @@ internal class P0TransferSession(context: Context, private val identity: P0Ident
                     hintResponder?.let { hintClosed = it.closeAndConfirm(); rendezvous.compareAndSet(it, null) }
                     if (!hintClosed) P0Protocol.fail("PORT_EXCHANGE_CLEANUP_UNCONFIRMED")
                     server.close(); listener.set(null)
-                    if (!peerWithinDirectSubnet(path, raw.inetAddress)) P0Protocol.fail("DIRECT_PATH_UNVERIFIED")
+                    if (!peerOnPath(path, raw.inetAddress)) P0Protocol.fail("DIRECT_PATH_UNVERIFIED")
                 } else {
-                    val remote = ipv4(if (automaticPortExchange) path.groupOwnerAddress else peerAddress ?: P0Protocol.fail("DIRECT_PATH_UNVERIFIED"))
-                    if (!peerWithinDirectSubnet(path, remote)) P0Protocol.fail("DIRECT_PATH_UNVERIFIED")
+                    val remote = ipv4(if (automaticPortExchange) direct!!.groupOwnerAddress else peerAddress ?: P0Protocol.fail("DIRECT_PATH_UNVERIFIED"))
+                    if (!peerOnPath(path, remote)) P0Protocol.fail("DIRECT_PATH_UNVERIFIED")
                     val selectedPort = if (automaticPortExchange) {
                         publish("resolving_receiver", "正在直连链路上寻找对方的接收端口，请先让电脑等待接收。")
                         val hint = P0Rendezvous.resolve(local, remote, localPin, peerPin) { ensureCurrent(initialPath) }
@@ -191,15 +220,16 @@ internal class P0TransferSession(context: Context, private val identity: P0Ident
                 val context = identity.newContext(peerPin) // New context after accept: one peer, one handshake, one task.
                 tls = context.socketFactory.createSocket(raw, raw.inetAddress.hostAddress, raw.port, true) as SSLSocket
                 socket.set(tls)
-                tls!!.useClientMode = role == "sender"
+                val tlsClient = !localHotspotFixture && role == "sender"
+                tls!!.useClientMode = tlsClient
                 tls!!.enabledProtocols = arrayOf("TLSv1.3")
-                if (role == "receiver") tls!!.needClientAuth = true
+                if (!tlsClient) tls!!.needClientAuth = true
                 if (!SSLSockets.isSupportedSocket(tls!!)) P0Protocol.fail("INVALID_MESSAGE")
                 SSLSockets.setUseSessionTickets(tls!!, false)
                 tls!!.soTimeout = (phaseDeadline - now()).coerceAtLeast(1).toInt()
                 tls!!.startHandshake()
                 val certificate = tls!!.session.peerCertificates.single() as java.security.cert.X509Certificate
-                P0Identity.validateCertificate(certificate, peerPin, if (role == "sender") "server" else "client")
+                P0Identity.validateCertificate(certificate, peerPin, if (tlsClient) "server" else "client")
                 if (tls!!.session.protocol != "TLSv1.3") P0Protocol.fail("IDENTITY_MISMATCH")
                 authenticated = true
                 absoluteDeadline = now() + 180_000
@@ -293,7 +323,7 @@ internal class P0TransferSession(context: Context, private val identity: P0Ident
                     }
                     report.put("userAcceptedOffer", accepted == OfferConsent.USER_ACCEPTED)
                         .put("operatorFixturePreauthorized", accepted == OfferConsent.OPERATOR_PREAUTHORIZED)
-                        .put("preauthorizationSource", if (accepted == OfferConsent.OPERATOR_PREAUTHORIZED) "debug_private_file_usb_lab" else JSONObject.NULL)
+                        .put("preauthorizationSource", if (accepted == OfferConsent.OPERATOR_PREAUTHORIZED) { if (localHotspotFixture) "debug_shell_memory_fixed_fixture_consent" else "debug_private_file_usb_lab" } else JSONObject.NULL)
                     val directory = File(app.filesDir, "p0-received")
                     storageStage("prepare_directory", "mkdir")
                     if (!directory.exists()) Os.mkdir(directory.path, 448)
@@ -449,22 +479,35 @@ internal class P0TransferSession(context: Context, private val identity: P0Ident
             }
         }
     }
-    private fun samePath(expected: P0DirectPath?): Boolean {
+    private fun samePath(expected: P0TransferPath?): Boolean {
         val actual = pathProvider() ?: return false
-        if (expected == null || actual.signature != expected.signature || actual.localAddress != expected.localAddress || actual.interfaceName != expected.interfaceName || android.os.SystemClock.elapsedRealtime() - actual.observedAtElapsedMs > 5_000) return false
+        if (expected == null || actual::class != expected::class || actual.signature != expected.signature || actual.localAddress != expected.localAddress || actual.interfaceName != expected.interfaceName || android.os.SystemClock.elapsedRealtime() - actual.observedAtElapsedMs > 5_000) return false
+        if (actual is P0LocalHotspotPath && expected is P0LocalHotspotPath &&
+            (actual.sessionId != expected.sessionId || actual.exactPeerAddress != expected.exactPeerAddress || actual.prefixLength != expected.prefixLength)) return false
         return runCatching { NetworkInterface.getByName(actual.interfaceName)?.inetAddresses?.toList()?.any { it.hostAddress == actual.localAddress } == true }.getOrDefault(false)
     }
-    private fun ensureCurrent(expected: P0DirectPath?) {
+    private fun ensureCurrent(expected: P0TransferPath?) {
         cancelled.get()?.let(P0Protocol::fail)
         if (!samePath(expected)) P0Protocol.fail("DIRECT_PATH_UNVERIFIED")
         if (now() >= minOf(phaseDeadline, absoluteDeadline)) P0Protocol.fail("TIMEOUT")
     }
     private fun persist(report: JSONObject) {
+        reportSnapshot.set(report.toString())
         val directory = File(app.filesDir, "reports").apply { mkdirs() }
         val temporary = File(directory, "latest-transfer.json.tmp")
         try {
             FileOutputStream(temporary).use { it.write(report.toString(2).toByteArray(Charsets.UTF_8)); it.fd.sync() }
             if (!temporary.renameTo(File(directory, "latest-transfer.json"))) throw java.io.IOException("report_commit_failed")
+            if (report.optBoolean("debugLocalHotspotFixture")) {
+                val id = report.optString("localHotspotSessionId")
+                val role = report.optString("role")
+                if (runCatching { UUID.fromString(id).toString() == id }.getOrDefault(false) && role in setOf("sender", "receiver")) {
+                    val snapshot = File(directory, "local-wifi-fixture-$id-$role.json")
+                    val pending = File(directory, "${snapshot.name}.tmp")
+                    FileOutputStream(pending).use { it.write(report.toString(2).toByteArray(Charsets.UTF_8)); it.fd.sync() }
+                    if (!pending.renameTo(snapshot)) throw java.io.IOException("report_commit_failed")
+                }
+            }
         } catch (error: Exception) { report.put("reportWriteFailed", true).put("reportWriteErrorType", error.javaClass.simpleName) }
     }
     companion object {
@@ -486,6 +529,11 @@ internal class P0TransferSession(context: Context, private val identity: P0Ident
             val mask = (0xffffffffL shl (32 - path.prefixLength)) and 0xffffffffL
             val localValue = number(ipv4(path.localAddress)); val remoteValue = number(remote)
             return (localValue and mask) == (remoteValue and mask) && (remoteValue and mask) != remoteValue && (remoteValue or mask) != 0xffffffffL
+        }
+        private fun peerOnPath(path: P0TransferPath, remote: InetAddress): Boolean = when (path) {
+            is P0DirectPath -> peerWithinDirectSubnet(path, remote)
+            is P0LocalHotspotPath -> remote is Inet4Address && remote.hostAddress == path.exactPeerAddress &&
+                LocalHotspotFixturePolicy.validPeer(path.localAddress, path.prefixLength, path.exactPeerAddress)
         }
     }
 }

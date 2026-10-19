@@ -12,6 +12,19 @@ namespace Wanwei;
 
 internal sealed record P0Path(IPAddress Local, IPAddress Remote, string InterfaceId, Func<bool> StillConnected, bool LoopbackHostTest = false)
 {
+    private bool localHotspot;
+    internal int? PrefixLength { get; private init; }
+    internal int? InterfaceIndex { get; private init; }
+    internal bool IsLocalHotspot => localHotspot && !LoopbackHostTest;
+    internal string TransportKind => LoopbackHostTest ? "host_test_loopback" : localHotspot ? "android_local_only_hotspot" : "native_wifi_direct";
+    internal string EndpointSource => LoopbackHostTest ? "host_test_loopback_no_radio_no_Direct_claim" : localHotspot ?
+        "owned_temporary_WLAN_exact_adapter_IPv4_and_same_subnet_DHCP_gateway" : "native_WiFiDirectDevice_and_actual_bound_socket";
+
+    // Only the live LocalWifiClient calls this factory after verifying its owned
+    // temporary association. No caller-supplied source flag can upgrade a path.
+    internal static P0Path CreateLocalHotspot(LocalWifiClient owner, LocalWifiFixtureEndpoint endpoint) =>
+        new(endpoint.Local, endpoint.Remote, endpoint.InterfaceId.ToString(), () => owner.VerifyFixturePath(endpoint))
+        { localHotspot = true, PrefixLength = endpoint.PrefixLength, InterfaceIndex = endpoint.InterfaceIndex };
     internal static P0Path Create(IReadOnlyList<DirectEndpointEvidence> pairs, Func<bool> stillConnected)
     {
         var candidates = pairs.Where(DirectPairing.ValidEndpoint).Select(p => new {
@@ -27,6 +40,7 @@ internal sealed record P0Path(IPAddress Local, IPAddress Remote, string Interfac
     internal bool Verify()
     {
         if (LoopbackHostTest) return IPAddress.IsLoopback(Local) && IPAddress.IsLoopback(Remote) && StillConnected();
+        if (localHotspot) { try { return StillConnected(); } catch { return false; } }
         try { return StillConnected() && NetworkInterface.GetAllNetworkInterfaces().Any(n => n.Id == InterfaceId &&
             n.OperationalStatus == OperationalStatus.Up && n.GetIPProperties().UnicastAddresses.Any(a => a.Address.Equals(Local))); }
         catch { return false; }
@@ -71,21 +85,30 @@ internal sealed class P0TransferStatus
     public bool? RendezvousControlClosed { get; set; }
     public bool SessionResumptionAllowed { get; } = false;
     public string EndpointSource { get; set; } = "native_WiFiDirectDevice_and_actual_bound_socket";
+    public string TransportKind { get; set; } = "native_wifi_direct";
+    public string TcpRole { get; set; } = "not_started";
+    public string TlsRole { get; set; } = "not_started";
     public string InternetContinuity { get; } = "not_tested";
 }
+
+internal enum P0ConnectionMode { Default, OutboundReceiver, InboundSenderHostTest }
 
 internal sealed class P0Transfer(P0Identity identity, string reportDirectory, Action<P0TransferStatus> update)
 {
     internal async Task RunAsync(bool receiver, P0Path path, string peerPin, int remotePort,
         Func<string, CancellationToken, Task<bool>> acceptOffer, CancellationToken cancellation, bool operatorFixturePreauthorized = false,
-        Func<int, CancellationToken, P0RendezvousResponder>? listenerReady = null, string portExchange = "manual_out_of_band")
+        Func<int, CancellationToken, P0RendezvousResponder>? listenerReady = null, string portExchange = "manual_out_of_band",
+        P0ConnectionMode connectionMode = P0ConnectionMode.Default)
     {
+        bool tcpServer = connectionMode == P0ConnectionMode.InboundSenderHostTest || receiver && connectionMode == P0ConnectionMode.Default;
         var status = new P0TransferStatus { Role = receiver ? "receiver" : "sender", LocalIdentity = identity.Fingerprint,
             TrustedPeerIdentity = peerPin, PeerTrustExplicitlyConfirmed = true, NativeLocalAddress = path.Local.ToString(),
-            NativeRemoteAddress = path.Remote.ToString(), InterfaceId = path.InterfaceId, PortExchange = portExchange };
+            NativeRemoteAddress = path.Remote.ToString(), InterfaceId = path.InterfaceId, PortExchange = portExchange,
+            TransportKind = path.TransportKind, EndpointSource = path.EndpointSource,
+            TcpRole = tcpServer ? "server" : "client", TlsRole = tcpServer ? "server" : "client" };
         status.OperatorFixturePreauthorized = operatorFixturePreauthorized;
-        status.PreauthorizationSource = operatorFixturePreauthorized ? "explicit_cli_local_USB_bootstrap_fixed_1MiB_fixture" : "none";
-        if (path.LoopbackHostTest) status.EndpointSource = "host_test_loopback_no_radio_no_Direct_claim";
+        status.PreauthorizationSource = !operatorFixturePreauthorized ? "none" : path.IsLocalHotspot ?
+            "explicit_debug_local_hotspot_USB_control_fixed_1MiB_fixture" : "explicit_cli_local_USB_bootstrap_fixed_1MiB_fixture";
         void Publish(string state)
         {
             status.State = state;
@@ -106,11 +129,15 @@ internal sealed class P0Transfer(P0Identity identity, string reportDirectory, Ac
         Task<P0Frame>? pendingFrame = null;
         try
         {
-            if (!P0Protocol.IsFingerprint(peerPin) || (!receiver && remotePort is < 1 or > 65535)) throw new P0Exception("INVALID_MESSAGE");
+            if (connectionMode == P0ConnectionMode.OutboundReceiver && (!receiver || !(path.IsLocalHotspot || path.LoopbackHostTest)) ||
+                connectionMode == P0ConnectionMode.InboundSenderHostTest && (receiver || !path.LoopbackHostTest) ||
+                !Enum.IsDefined(connectionMode) || path.IsLocalHotspot && receiver && connectionMode != P0ConnectionMode.OutboundReceiver ||
+                !tcpServer && listenerReady is not null) throw new P0Exception("CONNECTION_MODE_FORBIDDEN");
+            if (!P0Protocol.IsFingerprint(peerPin) || (!tcpServer && remotePort is < 1 or > 65535)) throw new P0Exception("INVALID_MESSAGE");
             if (!path.Verify()) throw new P0Exception("DIRECT_PATH_UNVERIFIED");
             using var establishment = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
             establishment.CancelAfter(TimeSpan.FromSeconds(30));
-            if (receiver)
+            if (tcpServer)
             {
                 listener.ExclusiveAddressUse = true; listener.Bind(new IPEndPoint(path.Local, 0)); listener.Listen(1);
                 var local = (IPEndPoint)listener.LocalEndPoint!; status.SocketLocalAddress = local.Address.ToString(); status.SocketLocalPort = local.Port;
@@ -153,7 +180,7 @@ internal sealed class P0Transfer(P0Identity identity, string reportDirectory, Ac
             socket.NoDelay = true;
             tls = new SslStream(new NetworkStream(socket, false), false, (_, cert, _, _) => P0Identity.ValidatePeer(cert, peerPin));
             Publish("tls_authenticating");
-            if (receiver)
+            if (tcpServer)
                 await tls.AuthenticateAsServerAsync(new SslServerAuthenticationOptions {
                     ServerCertificate = identity.Certificate, ClientCertificateRequired = true,
                     EnabledSslProtocols = SslProtocols.Tls13, AllowTlsResume = false, AllowRenegotiation = false,

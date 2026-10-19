@@ -27,12 +27,14 @@ internal class LocalHotspotSession(context: Context, private val changed: (Strin
     private var generation = 0L
     private var current: Run? = null
     private var localRetryLocked = false
+    @Volatile private var fixtureLeaseId: String? = null
+    @Volatile private var fixtureLeaseDeadline = 0L
 
     var busy = false
         private set
     val retryLocked: Boolean get() = localRetryLocked || DirectPairingSession.radioGate.locked()
 
-    private class Run(val lifecycle: LocalHotspotSafety.Lifecycle) {
+    private class Run(val lifecycle: LocalHotspotSafety.Lifecycle, val baseline: Set<LocalHotspotFixturePolicy.Endpoint>?) {
         val id = UUID.randomUUID().toString()
         val events = JSONArray()
         val record = JSONObject().put("id", id).put("sessionId", id)
@@ -66,12 +68,20 @@ internal class LocalHotspotSession(context: Context, private val changed: (Strin
         var setupTimer: Runnable? = null
         var activeTimer: Runnable? = null
         var sampleTick: Runnable? = null
+        var fixture: LocalHotspotFixtureLab? = null
+        var fixtureSettled = false
+        var fixtureClosing = false
     }
 
     fun report(): JSONObject? {
         current?.let { run ->
             try { run.observer?.let { run.record.put("wifiObservation", it.snapshot()) } }
             catch (error: Exception) { event(run, "observation_snapshot_exception").put("errorType", error.javaClass.simpleName) }
+            run.fixture?.let {
+                val fixture = it.status()
+                run.record.put("fixedFileFixture", fixture).put("fileTransferStarted", fixture.optInt("taskCount") > 0)
+                    .put("socketOpened", fixture.optJSONObject("transfer")?.has("listenerPort") == true)
+            }
             return run.record
         }
         return null
@@ -89,13 +99,24 @@ internal class LocalHotspotSession(context: Context, private val changed: (Strin
         val securityType = run.securityType ?: return null
         return JSONObject().put("ssid", ssid).put("passphrase", String(passphrase))
             .put("securityType", securityType).put("sessionId", run.id)
+            .put("endpointCandidates", run.fixture?.endpointCandidates() ?: JSONArray())
+    }
+
+    fun debugCall(request: JSONObject): JSONObject {
+        checkMainThread()
+        if (!BuildConfig.DEBUG || (app.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) == 0)
+            return JSONObject().put("errorCode", "DEBUG_REQUIRED")
+        return current?.fixture?.call(request) ?: JSONObject().put("errorCode", "NO_FIXTURE_LEASE")
     }
 
     fun start() {
         checkMainThread()
         if (busy || retryLocked || !DirectPairingSession.radioGate.acquire(ownerId)) return
         generation++
-        val run = Run(LocalHotspotSafety.Lifecycle(generation, now()))
+        val run = Run(LocalHotspotSafety.Lifecycle(generation, now()), LocalHotspotFixtureLab.snapshotEndpoints())
+        run.fixture = LocalHotspotFixtureLab(app, run.id, run.baseline,
+            activeLease = { fixtureLeaseId == run.id && now() < fixtureLeaseDeadline },
+            changed = { if (isCurrent(run)) { run.record.put("fixedFileFixture", run.fixture?.status()); notifyChange(run, "固定文件实验状态已更新；USB 仅交换参数，文件数据使用本次 Wi-Fi 连接。") } })
         current = run
         busy = true
         try {
@@ -227,6 +248,8 @@ internal class LocalHotspotSession(context: Context, private val changed: (Strin
         run.ssid = ssid
         run.passphrase = passphrase!!.toCharArray()
         run.securityType = securityType
+        fixtureLeaseDeadline = run.lifecycle.activeDeadline!!
+        fixtureLeaseId = run.id
         run.record.put("state", "active").put("validatedActiveReservationObserved", true)
             .put("activeStartedAtUtc", Instant.now().toString()).put("activeWindowMs", LocalHotspotSafety.ACTIVE_MS)
         run.activeTimer = Runnable {
@@ -263,6 +286,19 @@ internal class LocalHotspotSession(context: Context, private val changed: (Strin
 
     private fun closeOwned(run: Run, owned: WifiManager.LocalOnlyHotspotReservation, state: String,
                            preserveCurrentReservation: Boolean = false) {
+        if (!preserveCurrentReservation && !run.fixtureSettled && run.fixture != null) {
+            if (run.fixtureClosing) return
+            run.fixtureClosing = true
+            if (fixtureLeaseId == run.id) fixtureLeaseId = null
+            run.fixture!!.stop("CANCELLED") { settled ->
+                run.fixtureSettled = true
+                run.record.put("fixedFileFixture", run.fixture!!.status())
+                run.record.getJSONObject("cleanup").put("fixtureWorkerSettledBeforeApRelease", settled)
+                if (!settled) { run.lifecycle.markUncertain(); localRetryLocked = true }
+                closeOwned(run, owned, state, false)
+            }
+            return
+        }
         var closeReturned = false
         try {
             owned.close()
@@ -298,6 +334,7 @@ internal class LocalHotspotSession(context: Context, private val changed: (Strin
     private fun finish(run: Run, state: String) {
         if (run.finished) { updateLateReport(run); return }
         run.finished = true
+        if (fixtureLeaseId == run.id) fixtureLeaseId = null
         run.setupTimer?.let(handler::removeCallbacks)
         run.activeTimer?.let(handler::removeCallbacks)
         run.sampleTick?.let(handler::removeCallbacks)
@@ -305,6 +342,7 @@ internal class LocalHotspotSession(context: Context, private val changed: (Strin
         try { run.observer?.let { run.record.put("wifiObservation", it.stop()) } }
         catch (error: Exception) { event(run, "wifi_observation_stop_exception").put("errorType", error.javaClass.simpleName) }
         run.observer = null
+        run.fixture?.let { run.record.put("fixedFileFixture", it.status()) }
         wipeCredentials(run)
         localRetryLocked = localRetryLocked || run.lifecycle.uncertain
         run.record.put("state", "finished").put("finishedAtUtc", Instant.now().toString())

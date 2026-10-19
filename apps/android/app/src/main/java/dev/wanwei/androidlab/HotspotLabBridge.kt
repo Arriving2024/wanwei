@@ -21,4 +21,13 @@ internal object HotspotLabBridge {
         return try { read.get(1, TimeUnit.SECONDS) }
         catch (_: Exception) { read.cancel(false); null }
     }
+    fun debugCall(request: JSONObject): JSONObject {
+        if (!BuildConfig.DEBUG) return JSONObject().put("errorCode", "DEBUG_REQUIRED")
+        if (Looper.myLooper() == Looper.getMainLooper()) return session.get()?.debugCall(request)
+            ?: JSONObject().put("errorCode", "NO_FIXTURE_LEASE")
+        val invoke = FutureTask { session.get()?.debugCall(request) ?: JSONObject().put("errorCode", "NO_FIXTURE_LEASE") }
+        if (!main.post(invoke)) return JSONObject().put("errorCode", "MAIN_LOOPER_UNAVAILABLE")
+        return try { invoke.get(1, TimeUnit.SECONDS) }
+        catch (_: Exception) { invoke.cancel(false); JSONObject().put("errorCode", "MAIN_LOOPER_TIMEOUT") }
+    }
 }

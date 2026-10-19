@@ -839,7 +839,7 @@ class MainActivity : Activity() {
         stopGroupProbeButton = button(compatibility, "停止本轮检测") { groupProbe.cancel() }
         stopGroupProbeButton.id = R.id.group_probe_stop
         val localWifi = card("06  高速直连实验")
-        addText(localWifi, "按需创建独立的 5 GHz 本地 Wi-Fi，电脑无需与手机连接同一路由器。本轮仅检查电脑接入与实际连接标准，不传文件、不共享手机互联网，也不保证 Wi-Fi 7 或 MLO。", 14f, muted, false, 12)
+        addText(localWifi, "按需创建独立的 5 GHz 本地 Wi-Fi，电脑无需与手机连接同一路由器。可在维护者辅助下测试 1 MiB 合成文件双向传输，不读取个人文件、不共享手机互联网，也不保证 Wi-Fi 7 或 MLO。", 14f, muted, false, 12)
         localHotspotText = addText(localWifi, "尚未开始。需要 Android 16 或以上；最多 120 秒，系统可能调整原 Wi-Fi。", 14f, Color.WHITE, false, 12)
         localHotspotText.id = R.id.local_hotspot_state
         localHotspotButton = button(localWifi, "创建 5 GHz 临时直连", true) { requestLocalHotspot() }
@@ -925,7 +925,7 @@ class MainActivity : Activity() {
         }
         if (DirectPairingSession.radioGate.locked()) pairingText.text = "上次系统释放未确认，当前进程已锁定新的扫描和连接。请先结束系统 Direct 连接并重新打开应用。"
         else if (groupProbe.busy) pairingText.text = "正在检测手机独立直连；本轮不连接电脑，请等待检测和清理结束。"
-        else if (localHotspot.busy) pairingText.text = "高速本地直连实验进行中；文件实验尚未开放，请先结束本轮。"
+        else if (localHotspot.busy) pairingText.text = "高速本地直连实验进行中；请在本轮完成后再使用上方 Direct 文件入口。"
         else if (DirectPairingSession.radioGate.occupied() && !scanning && !stopping && !pairing.busy)
             pairingText.text = "上一页面的实验仍在清理，请等待结束后重试。"
     }
@@ -948,7 +948,7 @@ class MainActivity : Activity() {
             return
         }
         AlertDialog.Builder(this).setTitle("创建本次 5 GHz 临时直连？")
-            .setMessage("手机将创建独立的本地 Wi-Fi 供电脑接入，不提供互联网。系统可能调整原 Wi-Fi；本轮最多 120 秒，不传文件。离开页面或点结束会释放本次连接请求，实际连接标准以电脑回读为准，不保证 MLO。")
+            .setMessage("手机将创建独立的本地 Wi-Fi 供电脑接入，不提供互联网。系统可能调整原 Wi-Fi；本轮最多 120 秒。维护者可辅助测试双方认证后的 1 MiB 合成文件收发，不读取个人文件。离开页面或点结束会停止任务并释放本次连接请求，实际连接标准以电脑回读为准，不保证 MLO。")
             .setPositiveButton("创建本次直连") { _, _ ->
                 if (groupProbeCanStart() && hasDiscoveryPermission()) {
                     localHotspot.start()

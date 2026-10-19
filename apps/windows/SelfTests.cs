@@ -174,6 +174,7 @@ internal static class SelfTests
         Check("report cannot claim iOS interoperability", json.Contains("\"iosWindowsInterop\": \"unverified\""));
         NativeConnectionRetrySelfTests.Run(Check);
         P0SelfTests.Run(Check);
+        LocalWifiFixtureSelfTests.Run(Check);
         Console.WriteLine($"{passed} local checks passed including authenticated TLS loopback. No radio interoperability was tested by these checks.");
         return 0;
     }

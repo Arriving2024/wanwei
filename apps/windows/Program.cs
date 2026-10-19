@@ -13,12 +13,14 @@ internal static class Program
         {
             var options = Options.Parse(args);
             if (options.Mode == "self-test") return SelfTests.Run();
-            if (options.Mode == "local-wifi-lab")
+            if (options.Mode is "local-wifi-lab" or "local-wifi-fixture-lab")
             {
                 using var stop = new CancellationTokenSource();
                 ConsoleCancelEventHandler cancelHandler = (_, e) => { e.Cancel = true; stop.Cancel(); };
                 Console.CancelKeyPress += cancelHandler;
-                try { return LocalWifiLab.RunAsync(options.Directory, options.Seconds, stop.Token).GetAwaiter().GetResult(); }
+                try { return options.Mode == "local-wifi-fixture-lab" ?
+                    LocalWifiFixtureLab.RunAsync(options.Directory, stop.Token).GetAwaiter().GetResult() :
+                    LocalWifiLab.RunAsync(options.Directory, options.Seconds, stop.Token).GetAwaiter().GetResult(); }
                 finally { Console.CancelKeyPress -= cancelHandler; }
             }
             if (options.Mode is "probe" or "discover" or "advertise")
@@ -86,7 +88,7 @@ internal sealed record Options(string Mode, int Seconds, string Directory, strin
                 case "--usb-p0-lab":
                     if (modeSet) throw new ArgumentException("只允许一个运行模式。");
                     mode = "usb-p0-lab"; modeSet = true; labBootstrap = Path.GetFullPath(Value()); break;
-                case "--local-wifi-lab": case "--probe": case "--discover": case "--advertise": case "--self-test": case "--render-preview": case "--ui-smoke": case "--ui-advertise-smoke": case "--ui-pairing-smoke": case "--ui-pairing-prompt-smoke":
+                case "--local-wifi-fixture-lab": case "--local-wifi-lab": case "--probe": case "--discover": case "--advertise": case "--self-test": case "--render-preview": case "--ui-smoke": case "--ui-advertise-smoke": case "--ui-pairing-smoke": case "--ui-pairing-prompt-smoke":
                     if (modeSet) throw new ArgumentException("只允许一个运行模式。");
                     mode = args[i][2..]; modeSet = true;
                     if (mode is "render-preview" or "ui-smoke" or "ui-advertise-smoke" or "ui-pairing-smoke" or "ui-pairing-prompt-smoke") preview = Value();
@@ -106,6 +108,8 @@ internal sealed record Options(string Mode, int Seconds, string Directory, strin
         if (mode == "usb-p0-lab" && !secondsSet) seconds = 60;
         if (mode == "local-wifi-lab" && (seconds > 15 || cancel is not null))
             throw new ArgumentException("本地 Wi-Fi 实验仅允许 1–15 秒观察，不接受界面实验取消参数。");
+        if (mode == "local-wifi-fixture-lab" && (secondsSet || cancel is not null))
+            throw new ArgumentException("本地 Wi-Fi 文件实验使用固定期限，不接受时长或界面实验取消参数。");
         return new(mode, seconds, directory, preview, cancel, labBootstrap);
     }
 }
